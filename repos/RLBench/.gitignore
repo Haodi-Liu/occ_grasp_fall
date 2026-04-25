@@ -1,0 +1,10 @@
+
+*.pyc
+
+*.cpython-*.pyc
+
+__pycache__/
+
+.env/
+node_modules/
+*.log

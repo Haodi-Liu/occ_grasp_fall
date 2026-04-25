@@ -1,0 +1,88 @@
+defaults:
+    - method: BIMANUAL_PERACT
+
+
+rlbench:
+    task_name: "multi"
+    tasks: [bimanual_pick_plate]
+    demo_path: /mnt/rlbench_data
+    episode_length: 40  # Must match training for time_in_state consistency
+    cameras: ["over_shoulder_left", "over_shoulder_right", "overhead", "wrist_right", "wrist_left", "front"]
+    camera_resolution: [256, 256]
+    scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6]
+    include_lang_goal_in_obs: True
+    time_in_state: True
+    headless: True
+    gripper_mode: 'BimanualDiscrete'
+    # Diffuser Actor predicts end-effector poses (xyz + quaternion), not joint angles
+    # CRITICAL FIX: Use BimanualMoveArmThenGripper for end-effector pose control
+    # BimanualJointPositionActionMode expects joint angles, not poses!
+    arm_action_mode: 'BimanualEndEffectorPoseViaPlanning'
+    action_mode: 'BimanualMoveArmThenGripper'
+
+framework:
+    tensorboard_logging: True
+    csv_logging: True
+    gpu: 0
+    logdir: '/home/hdliu/arm_test/bimanual_pick_plate'
+    start_seed: 2
+    record_every_n: 20
+
+    eval_envs: 1
+    eval_from_eps_number: 0
+    eval_episodes: 30
+    eval_type: last # or 'best', 'missing', or specific checkpoint number like 5300
+    eval_save_metrics: True
+
+cinematic_recorder:
+    enabled: True
+    max_success_videos: 10  # Maximum number of successful episodes to record
+    max_fail_videos: 10     # Maximum number of failed episodes to record
+    camera_resolution: [1280, 720]
+    fps: 30
+    rotate_speed: 0.005
+    save_path: '/home/hdliu/arm_test/bimanual_pick_plate/multi/BIMANUAL_PERACT/seed2'
+    overlay_enabled: True
+    overlay_pip_camera: "over_shoulder_right"
+    overlay_pip_scale: 0.35
+
+aux_eval:
+    enabled: true
+    log_every_n_steps: 5
+    sample_every_n_steps: 10
+    max_samples_per_episode: 6
+    sample_camera: "over_shoulder_right"
+    save_path: "${cinematic_recorder.save_path}/aux_eval_samples"
+    sample_min_width: 300
+
+# C1 在线回流采集配置（新增）
+dagger_collect:
+    enabled: false
+    round_id: 0
+    save_root: /home/hdliu/arm_test/multi_task/dagger_data
+    camera_names: ${rlbench.cameras}
+
+    # 前缀优先采样策略
+    collect_every_n_steps: 2
+    collect_window_steps: 80
+    max_frames_per_episode: 40
+
+    # 回合结果筛选：both / success_only / fail_only
+    collect_outcome: both
+
+    # 关键字段校验（缺失即跳过该 step）
+    strict_required_keys: true
+    required_keys:
+      - has_affordance
+      - over_shoulder_left_contact_2d
+      - over_shoulder_left_grasp_2d
+      - over_shoulder_left_affordance_2d
+
+    # 从“已采回流样本”中均匀抽样生成可视化
+    aux_vis:
+      enabled: true
+      num_samples_per_episode: 10
+      sample_camera: over_shoulder_right
+      save_path: "${cinematic_recorder.save_path}/dagger_aux_samples"
+      sample_min_width: 300
+      sample_output_scale: 0.0

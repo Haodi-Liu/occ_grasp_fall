@@ -1,0 +1,56 @@
+# @package _group_
+
+name: 'ACT_BC_KEY'
+
+# Agent
+robot_name: 'bimanual'
+agent_type: 'bimanual'
+
+train_demo_path: "/mnt/rlbench_data"
+
+activation: lrelu
+lr: 3e-5
+weight_decay: 0.000001
+grad_clip: 0.1
+demo_augmentation: True
+demo_augmentation_every_n: 10
+
+keypoint_method: "heuristic"
+keyframe_seq_len: 4
+
+# temporal ensembling
+temporal_ensemble_k: 0.01
+
+# keyframe advancement thresholds
+keyframe_pos_thresh: 0.01  # meter
+keyframe_rot_thresh: 0.10  # rad
+keyframe_max_steps: 20     # per-keyframe max wait steps
+
+# hyperparameters
+lr_backbone: 3e-6
+backbone: resnet18
+dilation: False
+position_embedding: sine
+kl_weight: 5
+chunk_size: ${method.keyframe_seq_len}
+
+# transformer
+input_dim: 16 # 7 revolute joints + 1 gripper joints per arm (8 per arm, 16 total)
+enc_layers: 4
+dec_layers: 7
+dim_feedforward: 3200
+hidden_dim: 512
+dropout: 0.1
+nheads: 8
+num_queries: ${method.keyframe_seq_len}
+pre_norm: False
+
+# === ACT_BC_KEY specific settings ===
+condition_encoder: True
+encoder_use_type_embed: True
+
+# unused
+masks: False
+
+# vision-only - no language
+camera_names: ${rlbench.cameras}

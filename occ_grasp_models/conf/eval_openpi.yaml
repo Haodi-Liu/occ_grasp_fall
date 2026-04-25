@@ -1,0 +1,49 @@
+defaults:
+    - _self_
+    - method: OPENPI_POLICY
+
+
+rlbench:
+    task_name: "multi"
+    tasks: [bimanual_pick_plate]
+    # /mnt/rlbench_data/<task> is already a symlink to /mnt/rlbench_data/<task>.test.
+    # RLBench expects the suffix-free task directory name, so keep demo_path at the root.
+    demo_path: /mnt/rlbench_data
+    episode_length: 400
+    cameras: ["front", "wrist_left", "wrist_right"]
+    camera_resolution: [256, 256]
+    scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6]
+    include_lang_goal_in_obs: True
+    time_in_state: False
+    headless: True
+    gripper_mode: 'BimanualDiscrete'
+    arm_action_mode: 'BimanualJointPosition'
+    action_mode: 'BimanualJointPositionActionMode'
+
+framework:
+    tensorboard_logging: True
+    csv_logging: True
+    gpu: 0
+    logdir: '/home/hdliu/arm_test/bimanual_pick_plate'
+    # start_seed only affects occ's output directory namespace:
+    # <logdir>/<task_name>/<method.name>/seed<start_seed>/...
+    start_seed: 0
+    record_every_n: 5
+
+    eval_envs: 1
+    eval_from_eps_number: 0
+    eval_episodes: 30
+    # Use the concrete checkpoint id we actually have locally instead of relying on "last".
+    eval_type: 7999
+    eval_save_metrics: True
+    # eval.py reads this field from seed2/config.yaml; keep a harmless placeholder here.
+    training_iterations: 100
+
+cinematic_recorder:
+    enabled: True
+    max_success_videos: 10
+    max_fail_videos: 10
+    camera_resolution: [1280, 720]
+    fps: 30
+    rotate_speed: 0.005
+    save_path: ${framework.logdir}/${rlbench.task_name}/${method.name}/seed${framework.start_seed}

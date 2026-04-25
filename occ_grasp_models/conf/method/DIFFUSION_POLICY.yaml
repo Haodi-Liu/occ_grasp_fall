@@ -1,0 +1,99 @@
+# @package _group_
+
+name: 'DIFFUSION_POLICY'
+
+# Agent
+agent_type: 'bimanual'
+robot_name: 'bimanual'
+train_demo_path: ${rlbench.demo_path}
+
+# Diffusion backbone switch
+# - unet:        DiffusionUnetImagePolicy + ConditionalUnet1D
+# - transformer: DiffusionTransformerImagePolicy + TransformerForDiffusion
+model_type: 'unet'
+action_dim: 18
+horizon: 104
+n_obs_steps: 10
+n_action_steps: 52
+
+# UNet conditioning
+obs_as_global_cond: True
+
+# Transformer conditioning (方案B only)
+obs_as_cond: True
+pred_action_steps_only: False
+
+# Training
+lr: 5e-5
+weight_decay: 0.000001
+# Align with original diffusion_policy UNet AdamW defaults.
+optimizer_betas: [0.95, 0.999]
+# LR scheduler (minimal parity path with diffusion_policy workspaces)
+# Set to "none" to disable scheduler.
+lr_scheduler: cosine
+lr_warmup_steps: 1000
+# EMA over policy weights for eval/inference.
+use_ema: True
+ema_update_after_step: 0
+ema_inv_gamma: 1.0
+ema_power: 0.75
+ema_min_value: 0.0
+ema_max_value: 0.9999
+# Transformer optimizer alignment (used when model_type=transformer)
+transformer_weight_decay: 0.001
+obs_encoder_weight_decay: 0.000001
+grad_clip: 1
+num_inference_steps: 100
+
+# Mixed precision / math mode
+use_amp: True
+amp_dtype: bf16
+enable_tf32: True
+
+# Worker-side batch build
+move_batch_build_to_worker: True
+batch_builder_workers: 4
+batch_builder_pin_memory: True
+batch_builder_persistent_workers: True
+batch_builder_prefetch_factor: 2
+
+# Vision input
+camera_names: ${rlbench.cameras}
+# [W, H], aligned with rlbench.camera_resolution usage in this codebase.
+image_size: ${rlbench.camera_resolution}
+
+# MultiImageObsEncoder
+rgb_backbone: resnet50
+share_rgb_model: False
+use_group_norm: True
+resize_shape: null
+crop_shape: [76, 76]
+random_crop: True
+imagenet_norm: True
+
+# UNet architecture (aligned with diffusion_policy image UNet defaults in training config)
+diffusion_step_embed_dim: 128
+down_dims: [256, 512, 1024]
+kernel_size: 5
+n_groups: 8
+cond_predict_scale: True
+
+# Transformer architecture (aligned with diffusion_policy transformer defaults)
+n_layer: 10
+n_cond_layers: 0
+n_head: 8
+n_emb: 512
+p_drop_emb: 0.0
+p_drop_attn: 0.3
+causal_attn: True
+time_as_cond: True
+
+# Low-dim / action spec (action-equivalent proprioception)
+low_dim_size: 18
+
+# Index replay options
+index_cache_size: 32
+image_cache_size: 0
+# null: deterministic prefix selection (existing behavior)
+# int: deterministic random subset when num_demos < available demos
+index_seed: null

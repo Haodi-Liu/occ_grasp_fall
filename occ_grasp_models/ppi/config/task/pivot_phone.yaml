@@ -1,0 +1,29 @@
+name: pivot_phone
+
+task_name: pivot_phone
+dataset_task_name: bimanual_pivot_phone
+
+dataset:
+  _target_: ppi.dataset.rlbench2_dataset.RLBench2Dataset
+  data_path: data/training_raw/bimanual_pivot_phone/all_variations/episodes
+  pcd_path: data/training_processed/point_cloud/bimanual_pivot_phone/all_variations/episodes
+  dino_path: data/training_processed/dino_feature/bimanual_pivot_phone/all_variations/episodes
+  lang_emb_path: data/training_processed/instruction_embeddings.pkl
+  stats_filepath: data/training_processed/norm_stats/norm_stats_bimanual_pivot_phone_rgb_pcd_rps6144_keyframe_continuous_world_ordered_rps200.pth
+  point_flow_path: data/training_processed/point_flow/bimanual_pivot_phone/all_variations/episodes
+  horizon_keyframe: ${horizon_keyframe}
+  horizon_continuous: ${horizon_continuous}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  start: 0
+  end: 149
+  pcd_fps: 6144
+  skip_ep: []
+  kp_num: 10
+  val_ratio: 0.2
+  max_train_episodes: 150
+  pcd_type: rgb_pcd_rps6144
+  prediction_type: keyframe_continuous
+  point_flow_type: world_ordered_rps200
+  add_openess_sampling: true

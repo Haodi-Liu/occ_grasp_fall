@@ -1,0 +1,51 @@
+# @package _group_
+
+name: 'ACT_BC_ENC'
+
+# Agent
+robot_name: 'bimanual'
+agent_type: 'bimanual'
+
+train_demo_path: "/mnt/rlbench_data"
+
+activation: lrelu
+lr: 1e-4
+weight_decay: 0.000001
+grad_clip: 0.1
+demo_augmentation: True
+demo_augmentation_every_n: 10
+
+prev_action_horizon: 1
+next_action_horizon: 20
+
+# hyperparameters
+lr_backbone: 1e-5
+backbone: resnet18
+dilation: False
+position_embedding: sine
+kl_weight: 10
+chunk_size: ${method.next_action_horizon}
+
+# transformer
+input_dim: 16 # 7 revolute joints + 1 gripper joints per arm (8 per arm, 16 total)
+enc_layers: 4
+dec_layers: 7
+dim_feedforward: 3200
+hidden_dim: 512
+dropout: 0.1
+nheads: 8
+num_queries: ${method.next_action_horizon}
+pre_norm: False
+
+# === ACT_BC_ENC specific settings ===
+# Enable conditional encoder (injects qpos + image features into CVAE encoder)
+condition_encoder: True
+
+# Use type embeddings to distinguish CLS/qpos/image/action tokens in encoder
+encoder_use_type_embed: True
+
+# unused
+masks: False
+
+# vision-only - no language
+camera_names: ${rlbench.cameras}

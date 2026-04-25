@@ -1,0 +1,14 @@
+# @package _group_
+
+name: 'OPENPI_POLICY'
+
+agent_type: 'bimanual'
+robot_name: 'bimanual'
+
+# The occ-side OPENPI_POLICY agent always extracts these cameras:
+# front, wrist_left, wrist_right
+openpi_host: 'localhost'
+openpi_port: 8000
+
+# 1 = replan every step. Increase only if you explicitly want to reuse server chunks.
+replan_steps: 1

@@ -1,0 +1,73 @@
+# @package _group_
+
+name: 'ACT_BC_ENC_KEYPOINT_STRATEGY'
+
+# Agent
+robot_name: 'bimanual'
+agent_type: 'bimanual'
+
+train_demo_path: "/mnt/rlbench_data"
+
+activation: lrelu
+lr: 3e-5
+weight_decay: 0.000001
+grad_clip: 0.1
+demo_augmentation: True
+demo_augmentation_every_n: 10
+
+prev_action_horizon: 1
+next_action_horizon: 10
+
+# hyperparameters
+lr_backbone: 3e-6
+backbone: resnet18
+dilation: False
+position_embedding: sine
+kl_weight: 100
+chunk_size: ${method.next_action_horizon}
+
+# transformer
+input_dim: 16 # 7 revolute joints + 1 gripper joints per arm (8 per arm, 16 total)
+enc_layers: 4
+dec_layers: 7
+dim_feedforward: 3200
+hidden_dim: 512
+dropout: 0.1
+nheads: 8
+num_queries: ${method.next_action_horizon}
+pre_norm: False
+
+# === Conditional encoder settings ===
+condition_encoder: True
+encoder_use_type_embed: True
+
+# === KeypointPosePredictor settings (from KEYPOINT) ===
+keypoint_predictor:
+  num_heads: 8
+  num_layers: 2
+  dropout: 0.1
+
+# Image size for 2D keypoint prediction (must match rlbench.camera_resolution)
+img_size: 256
+
+# === StrategyPhasePredictor settings (from STRATEGY) ===
+num_strategies: 3   # EdgeHang, WallLever, PressTilt
+num_phases: 4       # PreManip, Grasp, ClearPath, Lift
+
+# === Temporal fusion (medium plan) ===
+temporal_fuse_alpha: 0.7  # 0~1, higher favors last frame
+
+# === Loss weights ===
+# Keypoint losses (from KEYPOINT)
+proj_2d_weight: 1.0
+aff_vis_weight: 1.0
+
+# Classification losses (from STRATEGY)
+strategy_weight: 0.2
+phase_weight: 0.2
+
+# unused
+masks: False
+
+# vision-only
+camera_names: ${rlbench.cameras}

@@ -1,0 +1,57 @@
+# @package _group_
+
+name: 'PPI'
+
+# Agent
+agent_type: 'bimanual'
+robot_name: 'bimanual'
+
+task:
+    name: ${rlbench.task_name}
+    task_name: ${rlbench.task_name}
+
+alg_name: "ppi"
+addition_info: "0907_1"
+seed: 0
+
+horizon_keyframe: 4
+horizon_continuous: 50
+n_obs_steps: 1
+n_action_steps: 54
+
+task_name: ${method.task.name}
+
+policy:
+    encoder_output_dim: 288 
+    horizon_keyframe: ${horizon_keyframe}
+    horizon_continuous: ${horizon_continuous}
+    n_action_steps: ${n_action_steps}
+    n_obs_steps: ${n_obs_steps}
+
+    noise_scheduler_cfg:
+      num_train_timesteps: 1000
+      prediction_type: epsilon
+
+    num_inference_steps: 1000
+    use_lang: true
+    what_condition: 'ppi'
+    predict_point_flow: true
+    pointcloud_encoder_cfg:
+      in_channels: 387
+      out_channels: ${method.policy.encoder_output_dim}
+      use_bn: true
+
+    pointflow_num: 200
+    text_prompt: "a black rectangle laptop"
+    prompt_type: "point"
+    sample_type: "rps"
+    sam_cameras: ["front"]
+    bounding_box: [[-0.5, -0.55, 0.77], [1.1, 0.55, 1.98]]
+    prediction_type: keyframe_continuous
+    use_pc_color: false
+    fps_num: 6144
+
+    sam_checkpoint_path: "../pretrained_models/sam_vit_b_01ec64.pth"
+    gdino_config_path: "../repos/GroundingDINO/groundingdino/config/GroundingDINO_SwinB_cfg.py"
+    gdino_checkpoint_path: "../pretrained_models/groundingdino_swinb_cogcoor.pth"
+    instruction_embeddings_path: "data/training_processed/instruction_embeddings.pkl"

@@ -1,0 +1,70 @@
+# @package _group_
+
+name: 'ACT_BC_KEYPOINT'
+
+# Agent
+robot_name: 'bimanual'
+agent_type: 'bimanual'
+train_demo_path: "/mnt/rlbench_data"
+lr: 3e-5
+weight_decay: 0.000001
+grad_clip: 0.1
+demo_augmentation: True
+demo_augmentation_every_n: 10
+
+# Keyframe sampling
+keypoint_method: "heuristic"
+keyframe_seq_len: 4
+
+# Backbone / CVAE
+lr_backbone: 3e-6
+backbone: resnet50
+dilation: False
+position_embedding: sine
+masks: False
+kl_weight: 100
+
+# Transformer
+input_dim: 16
+enc_layers: 4
+dec_layers: 7
+dim_feedforward: 3200
+hidden_dim: 512
+dropout: 0.1
+nheads: 8
+num_queries: ${method.keyframe_seq_len}
+pre_norm: False
+
+# temporal ensembling
+temporal_ensemble_k: 0.01
+
+# keyframe advancement thresholds
+keyframe_pos_thresh: 0.01  # meter
+keyframe_rot_thresh: 0.10  # rad
+keyframe_max_steps: 10     # per-keyframe max wait steps
+
+# Conditional encoder (keypoint-only)
+condition_encoder: True
+encoder_use_type_embed: True
+
+# predictor pretrain & freeze (keypoint-only)
+predictor_keypoint_ckpt_path: ""  # 必填
+
+# Keypoint predictor (Path B)
+keypoint_predictor:
+  num_heads: 8
+  num_layers: 2
+  dropout: 0.1
+img_size: 256
+proj_2d_weight: 1.0
+aff_vis_weight: 1.0
+
+# Gripper token (Thought A)
+use_gripper_token: True
+gripper_token_fuse: "mean"   # or "weighted"
+
+# Optional: temporal fusion (unused if no temporal dim)
+temporal_fuse_alpha: 0.7
+
+# vision-only
+camera_names: ${rlbench.cameras}

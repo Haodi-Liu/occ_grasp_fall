@@ -1,0 +1,128 @@
+name: four_tasks
+
+task_name: four_tasks
+dataset_task_name: bimanual_four_tasks
+
+dataset:
+  _target_: ppi.dataset.multi_rlbench2_dataset.MultiRLBench2Dataset
+  stats_filepath: data/training_processed/norm_stats/norm_stats_bimanual_four_tasks_rgb_pcd_rps6144_keyframe_continuous_world_ordered_rps200.pth
+  sample_mode: task_uniform
+  samples_per_task: null
+
+  start: 0
+  end: 149
+  seed: 42
+  skip_ep: []
+  val_ratio: 0.2
+  max_train_episodes: 150
+  pcd_fps: 6144
+  kp_num: 10
+  pcd_type: rgb_pcd_rps6144
+  prediction_type: keyframe_continuous
+  point_flow_type: world_ordered_rps200
+  add_openess_sampling: true
+
+  datasets:
+    bimanual_edge_phone:
+      _target_: ppi.dataset.rlbench2_dataset.RLBench2Dataset
+      data_path: data/training_raw/bimanual_edge_phone/all_variations/episodes
+      pcd_path: data/training_processed/point_cloud/bimanual_edge_phone/all_variations/episodes
+      dino_path: data/training_processed/dino_feature/bimanual_edge_phone/all_variations/episodes
+      lang_emb_path: data/training_processed/instruction_embeddings.pkl
+      stats_filepath: data/training_processed/norm_stats/norm_stats_bimanual_edge_phone_${task.dataset.pcd_type}_${task.dataset.prediction_type}_${task.dataset.point_flow_type}.pth
+      point_flow_path: data/training_processed/point_flow/bimanual_edge_phone/all_variations/episodes
+      horizon_keyframe: ${horizon_keyframe}
+      horizon_continuous: ${horizon_continuous}
+      pad_before: ${eval:'${n_obs_steps}-1'}
+      pad_after: ${eval:'${n_action_steps}-1'}
+      seed: ${task.dataset.seed}
+      start: ${task.dataset.start}
+      end: ${task.dataset.end}
+      pcd_fps: ${task.dataset.pcd_fps}
+      skip_ep: ${task.dataset.skip_ep}
+      kp_num: ${task.dataset.kp_num}
+      val_ratio: ${task.dataset.val_ratio}
+      max_train_episodes: ${task.dataset.max_train_episodes}
+      task_name: bimanual_edge_phone
+      pcd_type: ${task.dataset.pcd_type}
+      prediction_type: ${task.dataset.prediction_type}
+      point_flow_type: ${task.dataset.point_flow_type}
+      add_openess_sampling: ${task.dataset.add_openess_sampling}
+
+    bimanual_pivot_phone:
+      _target_: ppi.dataset.rlbench2_dataset.RLBench2Dataset
+      data_path: data/training_raw/bimanual_pivot_phone/all_variations/episodes
+      pcd_path: data/training_processed/point_cloud/bimanual_pivot_phone/all_variations/episodes
+      dino_path: data/training_processed/dino_feature/bimanual_pivot_phone/all_variations/episodes
+      lang_emb_path: data/training_processed/instruction_embeddings.pkl
+      stats_filepath: data/training_processed/norm_stats/norm_stats_bimanual_pivot_phone_${task.dataset.pcd_type}_${task.dataset.prediction_type}_${task.dataset.point_flow_type}.pth
+      point_flow_path: data/training_processed/point_flow/bimanual_pivot_phone/all_variations/episodes
+      horizon_keyframe: ${horizon_keyframe}
+      horizon_continuous: ${horizon_continuous}
+      pad_before: ${eval:'${n_obs_steps}-1'}
+      pad_after: ${eval:'${n_action_steps}-1'}
+      seed: ${task.dataset.seed}
+      start: ${task.dataset.start}
+      end: ${task.dataset.end}
+      pcd_fps: ${task.dataset.pcd_fps}
+      skip_ep: ${task.dataset.skip_ep}
+      kp_num: ${task.dataset.kp_num}
+      val_ratio: ${task.dataset.val_ratio}
+      max_train_episodes: ${task.dataset.max_train_episodes}
+      task_name: bimanual_pivot_phone
+      pcd_type: ${task.dataset.pcd_type}
+      prediction_type: ${task.dataset.prediction_type}
+      point_flow_type: ${task.dataset.point_flow_type}
+      add_openess_sampling: ${task.dataset.add_openess_sampling}
+
+    bimanual_pick_plate:
+      _target_: ppi.dataset.rlbench2_dataset.RLBench2Dataset
+      data_path: data/training_raw/bimanual_pick_plate/all_variations/episodes
+      pcd_path: data/training_processed/point_cloud/bimanual_pick_plate/all_variations/episodes
+      dino_path: data/training_processed/dino_feature/bimanual_pick_plate/all_variations/episodes
+      lang_emb_path: data/training_processed/instruction_embeddings.pkl
+      stats_filepath: data/training_processed/norm_stats/norm_stats_bimanual_pick_plate_${task.dataset.pcd_type}_${task.dataset.prediction_type}_${task.dataset.point_flow_type}.pth
+      point_flow_path: data/training_processed/point_flow/bimanual_pick_plate/all_variations/episodes
+      horizon_keyframe: ${horizon_keyframe}
+      horizon_continuous: ${horizon_continuous}
+      pad_before: ${eval:'${n_obs_steps}-1'}
+      pad_after: ${eval:'${n_action_steps}-1'}
+      seed: ${task.dataset.seed}
+      start: ${task.dataset.start}
+      end: ${task.dataset.end}
+      pcd_fps: ${task.dataset.pcd_fps}
+      skip_ep: ${task.dataset.skip_ep}
+      kp_num: ${task.dataset.kp_num}
+      val_ratio: ${task.dataset.val_ratio}
+      max_train_episodes: ${task.dataset.max_train_episodes}
+      task_name: bimanual_pick_plate
+      pcd_type: ${task.dataset.pcd_type}
+      prediction_type: ${task.dataset.prediction_type}
+      point_flow_type: ${task.dataset.point_flow_type}
+      add_openess_sampling: ${task.dataset.add_openess_sampling}
+
+    bimanual_pick_fork:
+      _target_: ppi.dataset.rlbench2_dataset.RLBench2Dataset
+      data_path: data/training_raw/bimanual_pick_fork/all_variations/episodes
+      pcd_path: data/training_processed/point_cloud/bimanual_pick_fork/all_variations/episodes
+      dino_path: data/training_processed/dino_feature/bimanual_pick_fork/all_variations/episodes
+      lang_emb_path: data/training_processed/instruction_embeddings.pkl
+      stats_filepath: data/training_processed/norm_stats/norm_stats_bimanual_pick_fork_${task.dataset.pcd_type}_${task.dataset.prediction_type}_${task.dataset.point_flow_type}.pth
+      point_flow_path: data/training_processed/point_flow/bimanual_pick_fork/all_variations/episodes
+      horizon_keyframe: ${horizon_keyframe}
+      horizon_continuous: ${horizon_continuous}
+      pad_before: ${eval:'${n_obs_steps}-1'}
+      pad_after: ${eval:'${n_action_steps}-1'}
+      seed: ${task.dataset.seed}
+      start: ${task.dataset.start}
+      end: ${task.dataset.end}
+      pcd_fps: ${task.dataset.pcd_fps}
+      skip_ep: ${task.dataset.skip_ep}
+      kp_num: ${task.dataset.kp_num}
+      val_ratio: ${task.dataset.val_ratio}
+      max_train_episodes: ${task.dataset.max_train_episodes}
+      task_name: bimanual_pick_fork
+      pcd_type: ${task.dataset.pcd_type}
+      prediction_type: ${task.dataset.prediction_type}
+      point_flow_type: ${task.dataset.point_flow_type}
+      add_openess_sampling: ${task.dataset.add_openess_sampling}
