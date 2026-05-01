@@ -43,6 +43,7 @@ policy:
 
     pointflow_num: 200
     text_prompt: "a black rectangle laptop"
+    text_prompts: null
     prompt_type: "point"
     sample_type: "rps"
     sam_cameras: ["front"]

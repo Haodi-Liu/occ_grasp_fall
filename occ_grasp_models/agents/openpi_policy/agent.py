@@ -1,24 +1,23 @@
-"""OpenPI websocket policy adapter for occ closed-loop evaluation.
+"""OpenPI websocket policy adapter for occ closed-loop evaluation (pose-control version).
 
 This agent stays lightweight on the occ / RLBench side:
 - it implements the YARR ``Agent`` interface expected by ``eval.py``
 - it extracts raw RLBench observations without ``PreprocessAgent``
 - it sends them to the openpi websocket server via ``openpi-client``
-- it reorders openpi's left-first 16D action into occ's right-first layout
+- it converts openpi's left-first 16D pose action into RLBench's right-first 18D pose action
 """
 
 import logging
-from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from yarr.agents.agent import ActResult, Agent, Summary
+from yarr.agents.agent import ActResult, Agent
 
 logger = logging.getLogger(__name__)
 
 
 class OpenPIPolicyAgent(Agent):
-    """Wrap an openpi websocket inference server as an occ-compatible agent."""
+    """Wrap an openpi websocket inference server as an occ-compatible pose agent."""
 
     def __init__(self, host="localhost", port=8000, replan_steps=1):
         self._host = host
@@ -99,7 +98,7 @@ class OpenPIPolicyAgent(Agent):
                 action_cache = action_cache[None, :]
             if action_cache.ndim != 2 or action_cache.shape[-1] != 16:
                 raise ValueError(
-                    "Expected openpi action chunk with shape (T, 16), got %s."
+                    "Expected openpi pose action chunk with shape (T, 16), got %s."
                     % (tuple(action_cache.shape),)
                 )
             if action_cache.shape[0] == 0:
@@ -114,20 +113,7 @@ class OpenPIPolicyAgent(Agent):
         if not np.isfinite(openpi_action).all():
             raise ValueError("openpi server returned non-finite action values: %r" % openpi_action)
 
-        # occ's BimanualDiscrete gripper expects hard 0/1 commands.
-        openpi_action[7] = 1.0 if openpi_action[7] > 0.5 else 0.0
-        openpi_action[15] = 1.0 if openpi_action[15] > 0.5 else 0.0
-
-        occ_action = np.concatenate(
-            [
-                openpi_action[8:15],   # right joints
-                openpi_action[15:16],  # right gripper
-                openpi_action[0:7],    # left joints
-                openpi_action[7:8],    # left gripper
-            ],
-            axis=0,
-        ).astype(np.float32, copy=False)
-
+        occ_action = _openpi_pose16_to_occ_pose18(openpi_action)
         return ActResult(occ_action)
 
     def update(self, step, replay_sample):
@@ -149,9 +135,9 @@ class OpenPIPolicyAgent(Agent):
             "front_rgb",
             "wrist_left_rgb",
             "wrist_right_rgb",
-            "left_joint_positions",
+            "left_gripper_pose",
             "left_gripper_open",
-            "right_joint_positions",
+            "right_gripper_pose",
             "right_gripper_open",
         )
         missing = [key for key in required_keys if key not in observation]
@@ -171,25 +157,34 @@ class OpenPIPolicyAgent(Agent):
             "wrist_right_rgb",
         )
 
+        left_pose = _canonicalize_pose7(
+            _extract_latest(observation["left_gripper_pose"]).astype(np.float32).reshape(-1)
+        )
+        left_gripper = _extract_gripper_scalar(observation["left_gripper_open"], "left_gripper_open")
+        right_pose = _canonicalize_pose7(
+            _extract_latest(observation["right_gripper_pose"]).astype(np.float32).reshape(-1)
+        )
+        right_gripper = _extract_gripper_scalar(observation["right_gripper_open"], "right_gripper_open")
+
         state = np.concatenate(
             [
-                _extract_latest(observation["left_joint_positions"]).astype(np.float32).reshape(-1),
-                _extract_latest(observation["left_gripper_open"]).astype(np.float32).reshape(-1),
-                _extract_latest(observation["right_joint_positions"]).astype(np.float32).reshape(-1),
-                _extract_latest(observation["right_gripper_open"]).astype(np.float32).reshape(-1),
+                left_pose,
+                left_gripper,
+                right_pose,
+                right_gripper,
             ],
             axis=0,
         )
         if state.shape != (16,):
             raise ValueError(
-                "Expected concatenated RLBench state to have shape (16,), got %s."
+                "Expected concatenated RLBench pose state to have shape (16,), got %s."
                 % (tuple(state.shape),)
             )
 
         prompt = _coerce_prompt(observation.get("lang_goal", ""))
 
         return {
-            "observation/state": state,
+            "observation/state": state.astype(np.float32, copy=False),
             "observation/front_rgb": front_rgb,
             "observation/wrist_left_rgb": wrist_left_rgb,
             "observation/wrist_right_rgb": wrist_right_rgb,
@@ -271,3 +266,70 @@ def _coerce_prompt(value):
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value)
+
+
+def _normalize_quaternion_1d(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32).reshape(-1)
+    if quat.shape != (4,):
+        raise ValueError("Expected quaternion with shape (4,), got %s." % (quat.shape,))
+
+    norm = float(np.linalg.norm(quat))
+    if not np.isfinite(norm) or norm < 1e-8:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+
+    quat = quat / norm
+    if quat[3] < 0.0:
+        quat = -quat
+    return quat.astype(np.float32, copy=False)
+
+
+def _canonicalize_pose7(pose7: np.ndarray) -> np.ndarray:
+    pose7 = np.asarray(pose7, dtype=np.float32).reshape(-1)
+    if pose7.shape != (7,):
+        raise ValueError("Expected pose7 with shape (7,), got %s." % (pose7.shape,))
+    xyz = pose7[:3]
+    quat = _normalize_quaternion_1d(pose7[3:7])
+    return np.concatenate([xyz, quat], axis=0).astype(np.float32, copy=False)
+
+
+def _extract_gripper_scalar(value, name: str) -> np.ndarray:
+    gripper = _extract_latest(value).astype(np.float32).reshape(-1)
+    if gripper.shape != (1,):
+        raise ValueError("Expected %s to contain exactly one value, got shape %s." % (name, gripper.shape))
+    return gripper.astype(np.float32, copy=False)
+
+
+def _binarize_scalar(value: float, default: float = 1.0) -> np.ndarray:
+    if not np.isfinite(value):
+        return np.asarray([default], dtype=np.float32)
+    return np.asarray([1.0 if float(value) > 0.5 else 0.0], dtype=np.float32)
+
+
+def _openpi_pose16_to_occ_pose18(action16: np.ndarray) -> np.ndarray:
+    action16 = np.asarray(action16, dtype=np.float32).reshape(-1)
+    if action16.shape != (16,):
+        raise ValueError("Expected 16D pose action, got %s." % (action16.shape,))
+
+    left_pose = _canonicalize_pose7(action16[0:7])
+    left_gripper = _binarize_scalar(action16[7], default=1.0)
+    right_pose = _canonicalize_pose7(action16[8:15])
+    right_gripper = _binarize_scalar(action16[15], default=1.0)
+
+    right_ignore = np.asarray([1.0], dtype=np.float32)
+    left_ignore = np.asarray([1.0], dtype=np.float32)
+
+    occ_action = np.concatenate(
+        [
+            right_pose,
+            right_gripper,
+            right_ignore,
+            left_pose,
+            left_gripper,
+            left_ignore,
+        ],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
+    if occ_action.shape != (18,):
+        raise ValueError("Expected 18D occ pose action, got %s." % (occ_action.shape,))
+    return occ_action

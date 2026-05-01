@@ -11,6 +11,7 @@ These paths exist on the development machine but are intentionally excluded from
 - `/home/hdliu/occ_grasp_fall/pretrained_models`
 - `/home/hdliu/occ_grasp_fall/occ_grasp_models/data`
 - `/home/hdliu/occ_grasp_fall/occ_grasp_models/exp_logs`
+- `/home/hdliu/occ_grasp_fall/occ_grasp_models/outputs`
 - `/home/hdliu/occ_grasp_fall/occ_grasp_models/eval_logs`
 - `/home/hdliu/occ_grasp_fall/occ_grasp_models/eval_videos`
 - `/home/hdliu/occ_grasp_fall/occ_grasp_models/eval_weights`

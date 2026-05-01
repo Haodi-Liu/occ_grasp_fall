@@ -44,6 +44,7 @@ def create_agent(cfg: DictConfig):
         predict_point_flow = cfg.method.policy.predict_point_flow,
         pointflow_num = cfg.method.policy.pointflow_num,
         text_prompt = cfg.method.policy.text_prompt,
+        text_prompts = cfg.method.policy.get("text_prompts", None),
         prompt_type = cfg.method.policy.prompt_type,
         sample_type = cfg.method.policy.sample_type,
         sam_cameras = cfg.method.policy.sam_cameras,

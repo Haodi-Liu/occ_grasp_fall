@@ -961,6 +961,39 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
 
         return Transition(obs, reward, terminal, info=info, summaries=summaries)
 
+    # ===== 新增：阶段评估接口（与 CustomRLBenchEnv 保持一致） =====
+
+    def get_phase_progress(self) -> Dict:
+        if self._task is None or self._task._task is None:
+            return None
+
+        task = self._task._task
+        if hasattr(task, 'get_phase_progress'):
+            return task.get_phase_progress()
+        return None
+
+    def evaluate_current_phase(self) -> Tuple[bool, int]:
+        if self._task is None or self._task._task is None:
+            return False, 1
+
+        task = self._task._task
+        if hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
+            return task.phased_evaluator.evaluate_current_phase()
+        return False, 1
+
+    def get_strategy_and_phase(self) -> Tuple[int, int]:
+        if self._task is None or self._task._task is None:
+            return 1, 1
+
+        task = self._task._task
+        if hasattr(task, 'evaluate_phase_and_get_labels'):
+            return task.evaluate_phase_and_get_labels()
+
+        strategy = getattr(task, 'STRATEGY_TYPE', 1)
+        return strategy, 1
+
+    # ============================================
+
     def reset_to_demo(self, i, variation_number=-1):
         if self._episodes_this_task == self._swap_task_every:
             self._set_new_task()

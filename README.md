@@ -27,6 +27,7 @@ The following directories stay on the local machine and are excluded from Git:
 - `pretrained_models/`
 - `occ_grasp_models/data/`
 - `occ_grasp_models/exp_logs/`
+- `occ_grasp_models/outputs/`
 - `occ_grasp_models/eval_logs/`
 - `occ_grasp_models/eval_videos/`
 - `occ_grasp_models/eval_weights/`

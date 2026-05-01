@@ -52,6 +52,7 @@ class PPIAgent(Agent):
                  predict_point_flow=True,
                  pointflow_num=200,
                  text_prompt=None,
+                 text_prompts=None,
                  prompt_type=None,
                  sample_type=None,
                  sam_cameras=None,
@@ -89,6 +90,7 @@ class PPIAgent(Agent):
         self.sam_predictor = SamPredictor(sam)
         self.gdino_model = load_model(gdino_config_path, gdino_checkpoint_path)
         self.text_prompt = text_prompt
+        self.text_prompts = list(text_prompts) if text_prompts is not None else None
         self.prompt_type = prompt_type
         self.sample_type = sample_type
         self.sam_cameras = sam_cameras
@@ -114,6 +116,23 @@ class PPIAgent(Agent):
         self.action_id = 0
         self.result_action=None
         self.result_object=None
+
+    def _update_text_prompt_from_task_id(self, observation: dict):
+        if not self.text_prompts:
+            return
+        task_id = observation.get('task_id')
+        if task_id is None:
+            return
+        if torch.is_tensor(task_id):
+            task_id = int(task_id.detach().flatten()[-1].item())
+        else:
+            task_id = int(np.asarray(task_id).reshape(-1)[-1])
+        if 0 <= task_id < len(self.text_prompts):
+            self.text_prompt = self.text_prompts[task_id]
+        else:
+            logging.warning(
+                "task_id %s out of range for text_prompts length %s; keeping text_prompt=%s",
+                task_id, len(self.text_prompts), self.text_prompt)
         
     def get_initial_pointflow(self, fps, observation):
         point_clouds = []
@@ -477,6 +496,8 @@ class PPIAgent(Agent):
             dim=-1
         )
         point_cloud = self.preprocess_pcd(observation)
+        if self._timestep == 0:
+            self._update_text_prompt_from_task_id(observation)
         if self.use_lang:
             # set_trace()
             if self._timestep==0:

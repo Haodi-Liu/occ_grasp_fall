@@ -17,8 +17,8 @@ rlbench:
     time_in_state: False
     headless: True
     gripper_mode: 'BimanualDiscrete'
-    arm_action_mode: 'BimanualJointPosition'
-    action_mode: 'BimanualJointPositionActionMode'
+    arm_action_mode: 'BimanualEndEffectorPoseViaPlanning'
+    action_mode: 'BimanualMoveArmThenGripper'
 
 framework:
     tensorboard_logging: True
@@ -36,7 +36,7 @@ framework:
     # Use the concrete checkpoint id we actually have locally instead of relying on "last".
     eval_type: 7999
     eval_save_metrics: True
-    # eval.py reads this field from seed2/config.yaml; keep a harmless placeholder here.
+    # eval.py reads this field from seed0/config.yaml in the current default setup; keep a harmless placeholder here.
     training_iterations: 100
 
 cinematic_recorder:

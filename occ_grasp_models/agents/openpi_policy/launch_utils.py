@@ -8,8 +8,8 @@ from agents.openpi_policy.agent import OpenPIPolicyAgent
 _REQUIRED_CAMERAS = ("front", "wrist_left", "wrist_right")
 _EXPECTED_ACTION_MODE = {
     "gripper_mode": "BimanualDiscrete",
-    "arm_action_mode": "BimanualJointPosition",
-    "action_mode": "BimanualJointPositionActionMode",
+    "arm_action_mode": "BimanualEndEffectorPoseViaPlanning",
+    "action_mode": "BimanualMoveArmThenGripper",
 }
 
 
