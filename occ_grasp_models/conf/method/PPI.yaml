@@ -36,6 +36,7 @@ policy:
     use_lang: true
     what_condition: 'ppi'
     predict_point_flow: true
+    enable_eval_visualization: false
     pointcloud_encoder_cfg:
       in_channels: 387
       out_channels: ${method.policy.encoder_output_dim}

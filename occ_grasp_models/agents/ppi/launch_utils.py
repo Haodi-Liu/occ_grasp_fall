@@ -50,6 +50,7 @@ def create_agent(cfg: DictConfig):
         sam_cameras = cfg.method.policy.sam_cameras,
         ckpt_name = cfg.framework.ckpt_name,
         jump_step = cfg.framework.jump_step,
+        enable_eval_visualization=cfg.method.policy.get("enable_eval_visualization", False),
         sam_checkpoint_path=cfg.method.policy.sam_checkpoint_path,
         gdino_config_path=cfg.method.policy.gdino_config_path,
         gdino_checkpoint_path=cfg.method.policy.gdino_checkpoint_path,

@@ -608,7 +608,7 @@ def get_demo(self, record: bool = True, ...):
 > - 之前使用累积条件（`phase2 = phase1 + new_cond`）
 > - 导致 `EdgeOverhangCondition` 在手机被抓起后失效
 > - Phase 2-4 因前置条件失效而无法被标记为完成
-> - 评估时出现 `return=40` 但 `phase_4_success_rate=0%` 的矛盾
+> - 评估时阶段成功率会被严重低估，可能与 `return` / reward 成功统计脱节
 >
 > **改动内容**：
 > - Phase 1: `[EdgeOverhangCondition]` — 一次性，完成后不再检查
@@ -795,15 +795,15 @@ class ClearPathCondition(Condition):
     清道条件：检查辅助臂是否已移开，不会阻碍抓取臂后续的抬起路径。
 
     成功条件：
-    1. 辅助臂夹爪已松开手机
-    2. 辅助臂夹爪tip与抓取臂tip保持足够距离
+    1. 辅助臂夹爪已松开物体
+    2. 辅助臂夹爪tip与目标物体保持足够距离
     3. 辅助臂tip与抓取臂后续所有路径点保持足够距离
 
-    坐标系：使用世界坐标系下的距离计算（两个动态物体间的真实距离）
+    坐标系：使用世界坐标系下的距离计算（辅助臂tip到目标物体中心/后续路径点）
 
     Args:
         aux_gripper: 辅助臂夹爪
-        grasper_tip_dummy: 抓取臂tip的dummy
+        target_object: 目标物体
         aux_tip_dummy: 辅助臂tip的dummy
         lift_waypoints: 抓取臂后续要经过的路径点dummy列表
         min_clearance: 最小安全距离，默认0.15米
@@ -811,12 +811,12 @@ class ClearPathCondition(Condition):
 
     def __init__(self,
                  aux_gripper,
-                 grasper_tip_dummy: Dummy,
+                 target_object: Shape,
                  aux_tip_dummy: Dummy,
                  lift_waypoints: List[Dummy] = None,
                  min_clearance: float = 0.15):
         self.aux_gripper = aux_gripper
-        self.grasper_tip_dummy = grasper_tip_dummy
+        self.target_object = target_object
         self.aux_tip_dummy = aux_tip_dummy
         self.lift_waypoints = lift_waypoints or []
         self.min_clearance = min_clearance
@@ -829,11 +829,11 @@ class ClearPathCondition(Condition):
         # 获取辅助臂tip位置
         aux_tip_pos = np.array(self.aux_tip_dummy.get_position())
 
-        # 检查与抓取臂当前位置的距离
-        grasper_tip_pos = np.array(self.grasper_tip_dummy.get_position())
-        distance_to_grasper = np.linalg.norm(aux_tip_pos - grasper_tip_pos)
+        # 检查与目标物体的距离
+        target_pos = np.array(self.target_object.get_position())
+        distance_to_target = np.linalg.norm(aux_tip_pos - target_pos)
 
-        if distance_to_grasper < self.min_clearance:
+        if distance_to_target < self.min_clearance:
             return False, False
 
         # 检查与所有后续路径点的距离
@@ -848,6 +848,8 @@ class ClearPathCondition(Condition):
     def reset(self):
         pass
 ```
+
+当前任务中的 `min_clearance` 为任务特化参数：`bimanual_edge_phone=0.34`，`bimanual_pivot_phone=0.15`，`bimanual_pick_plate=0.18`，`bimanual_pick_fork=0.25`。
 
 #### 5.2.4 LiftedCondition - 抬起条件
 
@@ -885,7 +887,7 @@ class LiftedCondition(Condition):
 
 **解决方案**：
 1. 在 TTM 文件中创建两套路径点：原始路径点（右臂抓取）和镜像路径点（左臂抓取，`_a` 后缀）
-2. ArmRoleSelector 从两套方案中选择可行且成本最优的方案
+2. ArmRoleSelector 从两套方案中选择一个方案：一套可行时优先选择可行方案；两套同为可行或同为不可行时按成本选择
 3. 方案确定后，臂角色自动确定
 
 #### 两套路径点方案
@@ -897,7 +899,7 @@ class LiftedCondition(Condition):
 
 #### 选择策略
 
-采用**两阶段筛选**（Feasibility-First）策略：
+采用**可行性优先 + 成本兜底**策略：
 
 1. **可行性检查**（优先）：验证每套方案的 **pusher 臂到第一个 pusher 路径点** 是否可达
    - `right_grasper`：检查 **左臂（pusher）** 到 `waypoint1` 的路径规划
@@ -906,11 +908,12 @@ class LiftedCondition(Condition):
 2. **筛选决策**：
    - 只有一套方案可行 → 选择该方案
    - 两套都可行 → 进入成本评估
-   - 两套都不可行 → 记录警告，使用默认方案（`right_grasper`），让重试机制处理
+   - 两套都不可行 → 只记录警告（`move on`），不在选择器内强制回退默认方案，继续进入成本评估
 
-3. **成本评估**（两套都可行时）：
+3. **成本评估**（两套都可行，或两套都不可行时作为兜底）：
    - 计算每套方案的总执行成本 = grasper臂成本 + **1.5 × pusher臂成本**
    - 选择总成本更低的方案
+   - 若两套都不可行，被选方案仍可能在后续 `validate()` 或执行阶段失败，并交由上层采集/重试逻辑处理
 
 > **设计说明 - 为何检查 pusher 而非 grasper**：
 > - **Pusher 先执行**：Phase 1 由 pusher 臂操作，此时物体处于初始位置
@@ -939,6 +942,8 @@ class ArmRoleSelector:
        （pusher 先执行，其路径点位置在物体移动前是稳定的）
     2. 成本次优：两套都可行时，选择总执行成本更低的方案
        （pusher 成本权重 1.5x，因为先执行且路径点位置稳定）
+    3. 成本兜底：两套都不可行时只记录 warning，不提前回退默认方案，
+       仍继续比较成本并返回成本更低的方案
 
     Args:
         robot: BimanualRobot实例
@@ -1011,10 +1016,9 @@ class ArmRoleSelector:
                 return 'left_grasper', {'grasper': 'left', 'pusher': 'right'}
 
             if not right_feasible and not left_feasible:
-                logging.warning("ArmRoleSelector: Both schemes infeasible, using default (right_grasper)")
-                return 'right_grasper', {'grasper': 'right', 'pusher': 'left'}
+                logging.warning("ArmRoleSelector: Both schemes infeasible, move on")
 
-            # ========== Step 3: 两套都可行，基于成本选择 ==========
+            # ========== Step 3: 两套都可行或都不可行，基于成本选择 ==========
             right_cost = self._compute_scheme_cost('right_grasper', waypoint_sets)
             left_cost = self._compute_scheme_cost('left_grasper', waypoint_sets)
 
@@ -1263,6 +1267,15 @@ ArmRoleSelector: Cost analysis - right_grasper=1.5678, left_grasper=1.2345
 ArmRoleSelector: Selecting left_grasper (lower cost)
 ```
 
+**输出示例（两套都不可行 - 记录警告后仍按成本兜底选择）：**
+```
+ArmRoleSelector: right_grasper feasible=False (left arm (pusher) cannot reach waypoint1: No collision-free path),
+                 left_grasper feasible=False (right arm (pusher) cannot reach waypoint1_a: No collision-free path)
+ArmRoleSelector: Both schemes infeasible, move on
+ArmRoleSelector: Cost analysis - right_grasper=1.5678, left_grasper=1.2345
+ArmRoleSelector: Selecting left_grasper (lower cost)
+```
+
 #### 与原设计的主要差异
 
 | 方面 | 原设计 | 新设计 |
@@ -1506,8 +1519,8 @@ class BimanualEdgePhone(BimanualTask):
         phase3_conditions = [
             stable_grasp_condition,
             ClearPathCondition(
-                pusher_gripper, grasper_tip, pusher_tip,
-                lift_waypoints=lift_waypoints, min_clearance=0.15
+                pusher_gripper, self.target_object, pusher_tip,
+                lift_waypoints=lift_waypoints, min_clearance=0.34
             )
         ]
 
@@ -1595,7 +1608,7 @@ class BimanualEdgePhone(BimanualTask):
             # Phase 3: Pusher撤离 (1个路径点)
             {'arm': pusher_arm, 'waypoints': [pusher_wps[3]], 'wait_after': 0.5},
             # Phase 4: Grasper抬起物体 (1个路径点)
-            {'arm': grasper_arm, 'waypoints': [grasper_wps[3]], 'wait_after': 0},
+            {'arm': grasper_arm, 'waypoints': [grasper_wps[3]], 'wait_after': 0.5},
         ]
 
     # ========== 策略和阶段标签接口（scene.py调用）==========
@@ -1668,15 +1681,15 @@ post_placement_setup() [关键！场景放置后调用]
 ├── role_selector.select_scheme(waypoint_sets)
 │   │
 │   ├── 检查 right_grasper 可行性
-│   │   └── 右臂 → waypoint0 可达?
+│   │   └── 左臂(pusher) → waypoint1 可达?
 │   │
 │   ├── 检查 left_grasper 可行性
-│   │   └── 左臂 → waypoint0_a 可达?
+│   │   └── 右臂(pusher) → waypoint1_a 可达?
 │   │
 │   ├── 可行性筛选
 │   │   ├── 只有一个可行 → 选择该方案
 │   │   ├── 两个都可行 → 计算成本，选成本低的
-│   │   └── 都不可行 → 用默认方案，依赖重试机制
+│   │   └── 都不可行 → 记录 warning 后继续计算成本，选成本低的
 │   │
 │   └── 返回 (active_waypoint_mode, role_assignment)
 │
@@ -1756,7 +1769,7 @@ execute_waypoints_bimanual_phased() [由scene.py调用]
 | `waypoint_sets` | 两套路径点方案（`right_grasper` / `left_grasper`） |
 | `active_waypoint_mode` | 当前激活的方案名称 |
 | `_get_active_waypoints()` | 获取当前激活方案的路径点配置 |
-| `ArmRoleSelector.select_scheme()` | 选择可行且成本最优的方案 |
+| `ArmRoleSelector.select_scheme()` | 一套可行时优先选择可行方案；两套同为可行或同为不可行时按成本选择 |
 | `execution_phases` | 动态生成，基于激活方案的路径点 |
 | `get_active_scheme()` | 返回当前激活的方案名称 |
 
@@ -1766,7 +1779,7 @@ execute_waypoints_bimanual_phased() [由scene.py调用]
 |------|---------|------|
 | `GraspPointHeightCondition` | ✅ 三任务共用 | Phase 1 翘起检测（调整阈值） |
 | `StableGraspCondition` | ✅ 完全复用 | Phase 2 抓取条件 |
-| `ClearPathCondition` | ✅ 完全复用 | Phase 3 清道条件 |
+| `ClearPathCondition` | ✅ 同构实现（阈值按任务调整） | Phase 3 清道条件 |
 | `LiftedCondition` | ✅ 复用（调整阈值） | Phase 4 拿起条件 |
 | `ArmRoleSelector` | ✅ 完全复用 | scheme-based 方案选择器 |
 | `PhasedSuccessEvaluator` | ✅ 完全复用 | 分阶段评估框架 |
@@ -1872,6 +1885,16 @@ class GraspPointHeightCondition(Condition):
 | contact 关键点 | `push_pt` | 推动接触点 |
 | affordance 关键点 | `wall_pivot` | 墙面支点 |
 | Waypoints 数量 | 9 (0-8) | grasper: 0,2,4,6; pusher: 1,3,5,7,8 |
+| base rotation | 0 或 π 附近 ±15° | `base_rotation_bounds()` 限制为两个离散朝向区域 |
+| base position | 默认位置 x/y ±0.05m | `base_position_bounds()` 返回位置钳制范围 |
+| position clamp | 仅 Pose A 生效 | `post_placement_setup()` 中先钳制位置，再选择方案 |
+
+**放置分布限制（实际实现）**：
+- `init_episode()` 随机设置 `_base_rotation_offset = np.random.choice([0, np.pi])`，对应 Pose A / Pose B。
+- `base_rotation_bounds()` 将场景 z 轴旋转限制到 `offset ± 15°`，覆盖父类默认的 `[-π, +π]` 全范围旋转。
+- 如果 `base_rotation_bounds()` 在 `init_episode()` 之前被调用，会使用 `np.random.choice([0, np.pi], p=[1, 0])` 初始化 fallback offset，即默认落到 Pose A。
+- `base_position_bounds()` 返回 `(0.05, 0.05)`，用于限制 x/y 方向位置偏移。
+- `post_placement_setup()` 首先调用 `_clamp_position_to_bounds()`；该钳制只在 `_base_rotation_offset == 0`（Pose A）时生效，Pose B 不钳制位置。
 
 #### 5B.3.2 waypoint_sets 定义
 
@@ -2007,10 +2030,32 @@ class BimanualPivotPhone(BimanualTask):
     def init_episode(self, index: int) -> List[str]:
         self._variation_index = index
         self._step_count = 0
+        self._base_rotation_offset = np.random.choice([0, np.pi])
         self.active_waypoint_mode = 'right_grasper'
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
         return ['push the phone against the wall and pivot it to grasp']
+
+    def base_rotation_bounds(self):
+        """
+        限制场景旋转到两个离散区域：
+        - Pose A: 0° ± 15°
+        - Pose B: 180° ± 15°
+        """
+        if not hasattr(self, '_base_rotation_offset'):
+            self._base_rotation_offset = np.random.choice([0, np.pi], p=[1, 0])
+
+        offset = self._base_rotation_offset
+        delta = np.deg2rad(15)
+        return (0.0, 0.0, offset - delta), (0.0, 0.0, offset + delta)
+
+    def boundary_root(self):
+        """返回场景的边界根对象，用于 SpawnBoundary 放置"""
+        return self.get_base()
+
+    def base_position_bounds(self):
+        """返回位置偏移限制 (delta_x, delta_y)，单位为米。"""
+        return 0.05, 0.05
 
     def step(self) -> None:
         """调试用：追踪 Phone 和 grasp_pt 高度"""
@@ -2024,7 +2069,9 @@ class BimanualPivotPhone(BimanualTask):
                 print(f"[Step {self._step_count:4d}] Phone z={phone_z:.4f} | grasp_pt=N/A")
 
     def post_placement_setup(self) -> None:
-        """在场景随机放置后选择方案"""
+        """在场景随机放置后限制位置、选择方案并设置评估器"""
+        self._clamp_position_to_bounds()
+
         self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
             self.waypoint_sets,
             critical_pusher_indices=[0]  # 检查第一个 pusher 路径点
@@ -2038,6 +2085,29 @@ class BimanualPivotPhone(BimanualTask):
         self._setup_phased_evaluator()
         if self.phased_evaluator:
             self.phased_evaluator.reset()
+
+    def _clamp_position_to_bounds(self) -> None:
+        """
+        将场景位置钳制到默认位置的指定邻域内。
+        注意：仅在 _base_rotation_offset == 0 (Pose A) 时生效。
+        """
+        if getattr(self, '_base_rotation_offset', 0) != 0:
+            return
+
+        if not hasattr(self, '_default_base_position'):
+            logging.warning("_default_base_position not set, skipping position clamp")
+            return
+
+        delta_x, delta_y = self.base_position_bounds()
+        base = self.get_base()
+        current_pos = np.array(base.get_position())
+        default_pos = self._default_base_position
+
+        clamped_x = np.clip(current_pos[0], default_pos[0] - delta_x, default_pos[0] + delta_x)
+        clamped_y = np.clip(current_pos[1], default_pos[1] - delta_y, default_pos[1] + delta_y)
+
+        if current_pos[0] != clamped_x or current_pos[1] != clamped_y:
+            base.set_position([clamped_x, clamped_y, current_pos[2]])
 
     @property
     def execution_phases(self):
@@ -2994,10 +3064,14 @@ def get_strategy_and_phase(self) -> Tuple[int, int]:
 
 **文件**：`/home/hdliu/occ_grasp_fall/repos/YARR/yarr/runners/_independent_env_runner.py`
 
-**修改位置1**：`_run_eval_independent` 方法开头（约第176行附近），添加阶段统计初始化
+**修改位置1**：`_run_eval_independent` 方法开头，初始化 rollout 完成/失败计数和阶段统计
 
 ```python
-# 在 success_count = 0 之后添加（约第177行后）
+# success_count 表示 rollout 正常完成并写入统计的 episode 数，不等价于 reward 成功数
+success_count = 0
+failed_count = 0
+failed_episodes = []
+
 # ===== 新增：阶段级别评估统计 =====
 phase_success_counts = {1: 0, 2: 0, 3: 0, 4: 0}  # 各阶段成功次数
 max_phases_reached = []  # 每个episode达到的最大阶段
@@ -3047,14 +3121,35 @@ if hasattr(env, 'get_phase_progress'):
 # ===========================================
 ```
 
+**修改位置3.5**：episode rollout 正常完成后，`success_count` 按“无异常完成”计数；reward 成功另用于 scheme 分层统计
+
+```python
+# Episode completed successfully
+success_count += 1
+
+# reward > 0.99 才作为任务成功写入 scheme_stats
+if reward > 0.99:
+    scheme_stats[current_gt_scheme]['success'] += 1
+    episode_steps = len(episode_rollout)
+    scheme_stats[current_gt_scheme]['success_steps'].append(episode_steps)
+else:
+    logging.info(f"Episode {eval_demo_seed} FAILED with scheme '{current_gt_scheme}'")
+```
+
 **修改位置4**：在 summaries 添加部分（约第349行附近），添加阶段评估指标
 
 ```python
-# 在 summaries.append(ScalarSummary('eval_envs/failed_count', failed_count)) 之后添加
+# rollout 完成/失败计数
+summaries.append(ScalarSummary('eval_envs/success_count', success_count))
+summaries.append(ScalarSummary('eval_envs/failed_count', failed_count))
 
 # ===== 新增：阶段级别评估指标 =====
 total_episodes = success_count + failed_count
 if total_episodes > 0:
+    # success_rate 是 rollout 无异常完成率，不是 reward 任务成功率
+    success_rate = success_count / total_episodes
+    summaries.append(ScalarSummary('eval_envs/success_rate', success_rate))
+
     for phase_id in range(1, 5):
         phase_rate = phase_success_counts[phase_id] / total_episodes
         summaries.append(ScalarSummary(f'eval_envs/phase_{phase_id}_success_rate', phase_rate))
@@ -3131,14 +3226,17 @@ if total_episodes > 0:
 | `phase_1_success_rate` | phase_1_count / total_episodes | 阶段1（预操作）成功率 |
 | `phase_2_success_rate` | phase_2_count / total_episodes | 阶段2（抓取）成功率 |
 | `phase_3_success_rate` | phase_3_count / total_episodes | 阶段3（清道）成功率 |
-| `phase_4_success_rate` | phase_4_count / total_episodes | 阶段4（拿起）成功率，等于任务成功率 |
+| `phase_4_success_rate` | phase_4_count / total_episodes | 阶段4（拿起）条件完成率，由环境 `PhasedSuccessEvaluator` 统计 |
 | `avg_max_phase` | mean(max_phases_reached) | 平均最大达到阶段（1-4） |
-| `success_count` | 已有 | 任务完成总成功数 |
-| `failed_count` | 已有 | 任务执行失败数 |
+| `success_count` | rollout 正常完成数 | episode 正常跑完并进入统计的数量，不等价于 reward 成功数 |
+| `failed_count` | rollout 异常/中断数 | 通信错误、`StopIteration`、其他异常等未正常完成的数量 |
+| `success_rate` | success_count / (success_count + failed_count) | rollout 无异常完成率，不是任务 reward 成功率 |
+| scheme 分层 success rate | reward_success_count / scheme_total | `reward > 0.99` 的任务成功率，按 `left_grasper/right_grasper/unknown` 分层统计 |
 
 **解读示例**：
 - `phase_1_success_rate=0.9, phase_2_success_rate=0.7` → 模型在抓取阶段有问题
 - `avg_max_phase=2.5` → 平均能完成到抓取阶段，但经常在清道阶段失败
+- `success_rate=1.0` 只表示评估 episode 没有异常中断；任务是否成功需要看 reward 相关统计或 scheme 分层 success rate
 
 ---
 
@@ -3247,7 +3345,7 @@ if total_episodes > 0:
 **1.8版本更新说明**:
 - ✅ **修复 `evaluate_current_phase()` 阶段漏记录 bug**
   - 问题：原方法每次只评估一个阶段，如果多个阶段条件在同一帧满足，后续阶段不会被记录
-  - 表现：`return` 与 `phase_4_success_rate` 不一致（如 return=20% 但 phase_4=10%）
+  - 表现：阶段成功率被低估，可能与 `return` / reward 成功统计脱节
   - 修复：改用 `while` 循环，一次调用中评估所有可完成的阶段
   - 修改文件：`bimanual_edge_phone.py` 第470-495行
 
@@ -3260,7 +3358,7 @@ if total_episodes > 0:
 **1.6版本更新说明（重要）**:
 - ⚠️ **阶段条件设计从"累积条件"改为"非累积条件"**
   - 修复：EdgeOverhangCondition 在手机被抓起后失效导致 Phase 2-4 无法完成的问题
-  - 修复：评估时 `return=40` 但 `phase_4_success_rate=0%` 的矛盾
+  - 修复：阶段成功率被前置条件失效严重低估的问题
   - Phase 1: `[EdgeOverhangCondition]` — 一次性
   - Phase 2-3: `[StableGraspCondition, ...]` — 持续检查抓取稳定性
   - Phase 4: `[LiftedCondition]` — 只检查高度（与任务成功条件一致）

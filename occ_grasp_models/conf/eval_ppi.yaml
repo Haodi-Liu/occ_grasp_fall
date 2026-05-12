@@ -47,3 +47,5 @@ cinematic_recorder:
     fps: 30
     rotate_speed: 0.005
     save_path: ${framework.logdir}/${rlbench.task_name}/${framework.weight_name}
+    max_success_videos: 10
+    max_fail_videos: 10

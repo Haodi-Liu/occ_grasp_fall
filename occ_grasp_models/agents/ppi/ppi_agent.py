@@ -58,6 +58,7 @@ class PPIAgent(Agent):
                  sam_cameras=None,
                  ckpt_name=None,
                  jump_step=1,
+                 enable_eval_visualization=False,
                  sam_checkpoint_path="../pretrained_models/sam_vit_b_01ec64.pth",
                  gdino_config_path="../repos/GroundingDINO/groundingdino/config/GroundingDINO_SwinB_cfg.py",
                  gdino_checkpoint_path="../pretrained_models/groundingdino_swinb_cogcoor.pth",
@@ -85,6 +86,7 @@ class PPIAgent(Agent):
         self.visual_targets = []
         self.pointflow_num = pointflow_num
         self.predict_point_flow=predict_point_flow
+        self.enable_eval_visualization = enable_eval_visualization
         sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint_path)
         sam.to(device='cuda')
         self.sam_predictor = SamPredictor(sam)
@@ -571,13 +573,15 @@ class PPIAgent(Agent):
         torch.cuda.synchronize()
         one_prediction_time = time.time()
             
-        if self.predict_point_flow:
+        if self.enable_eval_visualization and self.predict_point_flow:
             self.visualizer_object_pose_pointflow(actions=self.result_action[0,1:].tolist(), point_flow = self.result_pointflow[0].tolist()) 
-        else:
+        elif self.enable_eval_visualization:
             if self.prediction_type == "keyframe":
                 self.visualizer(self.result_action[0].tolist())
             else:
                 self.visualizer(self.result_action[0,1:].tolist())
+        else:
+            self.visual_targets = []
         self._timestep+=1
         print(f"timestep:{self._timestep}")
         return ActResult(raw_action.detach().cpu().numpy(),visual_targets = self.visual_targets)

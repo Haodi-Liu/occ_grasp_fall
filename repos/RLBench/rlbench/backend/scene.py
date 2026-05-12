@@ -25,7 +25,6 @@ from rlbench.backend.robot import UnimanualRobot
 from rlbench.backend.robot import BimanualRobot
 from rlbench.backend.spawn_boundary import SpawnBoundary
 from rlbench.backend.task import Task
-from rlbench.backend.waypoints import Point
 from rlbench.backend.utils import rgb_handles_to_mask
 from rlbench.demo import Demo
 from rlbench.noise_model import NoiseModel
@@ -473,16 +472,6 @@ class Scene(object):
     def execute_waypoints_bimanual(self, do_record) -> bool:
         # Check if task defines phased execution
         if hasattr(self.task, 'execution_phases') and self.task.execution_phases:
-            # 检测是否使用备选路径点（_a 后缀）
-            execution_phases = self.task.execution_phases
-            uses_alt_waypoints = any(
-                wp_name.endswith('_a')
-                for phase in execution_phases
-                for wp_name in phase.get('waypoints', [])
-            )
-            if uses_alt_waypoints:
-                logging.info("Detected alternative waypoints (_a suffix), using execute_waypoints_bimanual_phased_alt")
-                return self.execute_waypoints_bimanual_phased_alt(do_record)
             return self.execute_waypoints_bimanual_phased(do_record)
 
         right_waypoints = self.task.right_waypoints
@@ -726,145 +715,6 @@ class Scene(object):
 
         success, term = self.task.success()
         return success
-
-
-    def execute_waypoints_bimanual_phased_alt(self, do_record) -> bool:
-        """[临时函数] 支持备选路径点（_a 后缀）的分阶段执行。
-
-        与 execute_waypoints_bimanual_phased 的区别：
-        - 直接从场景中按名字获取路径点，支持任意命名（包括 _a 后缀）
-        - 不依赖 task.get_waypoints() 的标准命名模式
-
-        用于验证镜像路径点方案。
-        """
-        execution_phases = self.task.execution_phases
-
-        success = False
-        self._ignore_collisions_for_current_waypoint = False
-
-        for phase_idx, phase in enumerate(execution_phases):
-            arm_name = phase['arm']
-            waypoint_names = phase['waypoints']
-            wait_after = phase.get('wait_after', 0)
-
-            logging.info(f"=== Phase {phase_idx + 1}: {arm_name} arm executing {waypoint_names} ===")
-
-            # Get arm for this phase
-            if arm_name == 'right':
-                arm = self.robot.right_arm
-            else:
-                arm = self.robot.left_arm
-
-            # Execute each waypoint in this phase sequentially
-            for wp_name in waypoint_names:
-                # 直接从场景中获取路径点（支持任意命名）
-                if not Object.exists(wp_name):
-                    logging.warning(f"Waypoint {wp_name} not found in scene, skipping")
-                    continue
-
-                waypoint_dummy = Dummy(wp_name)
-                point = Point(waypoint_dummy, arm)
-
-                self._ignore_collisions_for_current_waypoint = point._ignore_collisions
-
-                point.start_of_path()
-                if point.skip:
-                    logging.info(f"Skipping waypoint {wp_name}")
-                    continue
-
-                # Get colliding shapes and temporarily disable collision
-                grasped_objects = self.robot.right_gripper.get_grasped_objects() + \
-                                  self.robot.left_gripper.get_grasped_objects()
-                colliding_shapes = []
-                for s in self.pyrep.get_objects_in_tree(object_type=ObjectType.SHAPE):
-                    if s in grasped_objects:
-                        continue
-                    if not s.is_collidable():
-                        continue
-                    if arm.check_arm_collision(s):
-                        colliding_shapes.append(s)
-
-                logging.debug(f"Colliding objects for {wp_name}: {[s.get_name() for s in colliding_shapes]}")
-
-                [s.set_collidable(False) for s in colliding_shapes]
-                try:
-                    path = point.get_path()
-                except ConfigurationPathError as e:
-                    logging.error(f"Unable to get path for {wp_name}: {e}")
-                    raise DemoError(f'Could not get a path for waypoint {wp_name}.', task=self.task) from e
-                finally:
-                    [s.set_collidable(True) for s in colliding_shapes]
-
-                ext = point.get_ext()
-                path.visualize()
-
-                # Execute path
-                done = False
-                while not done:
-                    done = path.step()
-                    self.step()
-
-                    # Record joint positions for both arms
-                    executed_action = path.get_executed_joint_position_action()
-                    if arm_name == 'right':
-                        self._right_execute_demo_joint_position_action = executed_action
-                        self._left_execute_demo_joint_position_action = self.robot.left_arm.get_joint_positions()
-                    else:
-                        self._left_execute_demo_joint_position_action = executed_action
-                        self._right_execute_demo_joint_position_action = self.robot.right_arm.get_joint_positions()
-
-                    # 双臂碰撞检测
-                    if self._check_dual_arm_collision():
-                        logging.warning(f"Dual arm collision detected during {wp_name} execution")
-                        raise DemoError('Dual arm collision detected', task=self.task)
-
-                    # ====== 更新策略和阶段标签 ======
-                    if hasattr(self.task, 'evaluate_phase_and_get_labels'):
-                        self._current_strategy_type, self._current_phase_type = \
-                            self.task.evaluate_phase_and_get_labels()
-                    else:
-                        self._current_strategy_type = getattr(self.task, 'STRATEGY_TYPE', 1)
-                        self._current_phase_type = 1
-
-                    do_record()
-                    success, term = self.task.success()
-
-                point.end_of_path()
-                path.clear_visualization()
-                logging.info(f"Done executing {wp_name}")
-
-                # Handle extension strings (gripper actions etc.)
-                if len(ext) > 0:
-                    for ext_part in ext.split(";"):
-                        self._handle_extensions_strings(ext_part.strip(), do_record)
-
-            # Wait after phase for stability
-            if wait_after > 0:
-                logging.info(f"Waiting {wait_after} seconds for stability...")
-                wait_steps = int(wait_after * 50)  # ~50Hz simulation
-                for _ in range(wait_steps):
-                    self.step()
-                    self._right_execute_demo_joint_position_action = self.robot.right_arm.get_joint_positions()
-                    self._left_execute_demo_joint_position_action = self.robot.left_arm.get_joint_positions()
-
-                    if self._check_dual_arm_collision():
-                        logging.warning("Dual arm collision detected during wait period")
-                        raise DemoError('Dual arm collision detected', task=self.task)
-
-                    # ====== 等待期间也更新标签 ======
-                    if hasattr(self.task, 'evaluate_phase_and_get_labels'):
-                        self._current_strategy_type, self._current_phase_type = \
-                            self.task.evaluate_phase_and_get_labels()
-                    else:
-                        self._current_strategy_type = getattr(self.task, 'STRATEGY_TYPE', 1)
-                        self._current_phase_type = 1
-
-                    do_record()
-                    success, term = self.task.success()
-
-        success, term = self.task.success()
-        return success
-
 
     def get_demo(self, record: bool = True,
                  callable_each_step: Callable[[Observation], None] = None,
