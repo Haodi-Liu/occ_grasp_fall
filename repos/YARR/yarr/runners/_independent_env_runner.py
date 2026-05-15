@@ -262,7 +262,6 @@ class _IndependentEnvRunner(_EnvRunner):
             tr = TaskRecorder(env, cam_motion, fps=rec_cfg.fps, overlay_cfg=rec_cfg)
 
             env.env._action_mode.arm_action_mode.set_callable_each_step(tr.take_snap)
-            # env.env._action_mode.arm_action_mode.set_callable_each_prediction(tr.take_snap_prediction)
 
         if not os.path.exists(self._weightsdir):
             raise Exception('No weights directory found.')
@@ -295,7 +294,6 @@ class _IndependentEnvRunner(_EnvRunner):
             # ===== 新增：阶段级别评估统计 =====
             phase_success_counts = {1: 0, 2: 0, 3: 0, 4: 0}  # 各阶段成功次数
             max_phases_reached = []  # 每个episode达到的最大阶段
-            phase_completion_frames = {1: [], 2: [], 3: [], 4: []}  # 各阶段完成帧数
             # =================================
 
             # ===== Video recording quota counters =====
@@ -420,17 +418,13 @@ class _IndependentEnvRunner(_EnvRunner):
                                 pred_info=(replay_transition.info or {}).get("pred_info"),
                             )
 
-                        # ===== 新增：每帧评估阶段状态 =====
-                        if hasattr(env, 'evaluate_current_phase'):
-                            phase_completed, completed_phase = env.evaluate_current_phase()
-                            # 记录阶段完成事件（注意：返回值已经是 completed_phase，不需要 -1）
-                            if phase_completed:
-                                # 检查该阶段是否已记录过（避免重复记录）
-                                already_recorded = completed_phase in [r.info.get('phase_completed') for r in episode_rollout]
-                                if not already_recorded:
-                                    # 标记该阶段刚完成
-                                    replay_transition.info['phase_completed'] = completed_phase
-                                    replay_transition.info['completion_frame'] = len(episode_rollout)
+                        # ===== 新增：读取环境 callback 已维护的真实阶段状态 =====
+                        if hasattr(env, 'get_phase_progress'):
+                            phase_progress = env.get_phase_progress()
+                            if phase_progress is not None:
+                                if replay_transition.info is None:
+                                    replay_transition.info = {}
+                                replay_transition.info['phase_progress'] = phase_progress
                         # ============================================
 
                     # ===== Only process data if episode completed successfully =====
@@ -457,13 +451,22 @@ class _IndependentEnvRunner(_EnvRunner):
                                 phase_progress = env.get_phase_progress()
                                 if phase_progress is not None:
                                     phase_status = phase_progress.get('phase_status', {})
-                                    current_max_phase = 0
                                     for phase_id in range(1, 5):
                                         if phase_status.get(phase_id, False):
                                             phase_success_counts[phase_id] += 1
-                                            current_max_phase = phase_id
+                                    current_max_phase = phase_progress.get('max_completed_phase', 0)
+                                    if current_max_phase == 0:
+                                        current_max_phase = max(
+                                            [phase_id for phase_id, ok in phase_status.items() if ok],
+                                            default=0
+                                        )
                                     max_phases_reached.append(current_max_phase)
-                                    logging.info(f"Phase progress: {phase_status}, Max phase: {current_max_phase}")
+                                    logging.info(
+                                        "Phase progress: %s, Max completed phase: %s, Max current phase reached: %s",
+                                        phase_status,
+                                        current_max_phase,
+                                        phase_progress.get('max_current_phase_reached', current_max_phase + 1),
+                                    )
                             # ===========================================
 
                             # save recording with quota control

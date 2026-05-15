@@ -47,5 +47,11 @@ cinematic_recorder:
     fps: 30
     rotate_speed: 0.005
     save_path: ${framework.logdir}/${rlbench.task_name}/${framework.weight_name}
-    max_success_videos: 10
-    max_fail_videos: 10
+    max_success_videos: 30
+    max_fail_videos: 30
+    overlay_enabled: True
+    overlay_source: "env"
+    overlay_draw_keypoints: True
+    overlay_draw_grippers: True
+    overlay_draw_gt_arm_scheme: True
+    overlay_draw_xyz_table: False

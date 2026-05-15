@@ -46,49 +46,12 @@ class TaskRecorder(object):
         self._snaps = []
         self._current_snaps = []
         self._overlay_cfg = overlay_cfg
-        # self._prediction_snaps = []
 
     def take_snap(self, obs: Observation):
         self._cam_motion.step()
         frame = (self._cam_motion.cam.capture_rgb() * 255.).astype(np.uint8)
         frame = self._apply_overlay(frame, obs)
         self._current_snaps.append(frame)
-        
-    # def take_snap_prediction(self, obs: Observation):
-    #     self._prediction_snaps.append(
-    #         (self._cam_motion.cam.capture_rgb() * 255.).astype(np.uint8))
-
-    # def save(self, path, lang_goal, reward):
-    #     print(f"Converting to video ... {path}")
-    #     os.makedirs(os.path.dirname(path), exist_ok=True)
-    #     # OpenCV QT version can conflict with PyRep, so import here
-    #     import cv2
-    #     image_size = self._cam_motion.cam.get_resolution()
-    #     video = cv2.VideoWriter(
-    #             path, cv2.VideoWriter_fourcc('m', 'p', '4', 'v'), self._fps,
-    #             tuple(image_size))
-        
-    #     for image in self._current_snaps:
-    #         frame = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-    #         font = cv2.FONT_HERSHEY_DUPLEX
-    #         font_scale = (0.45 * image_size[0]) / 640
-    #         font_thickness = 2
-
-
-    #         if lang_goal:
-
-    #             lang_textsize = cv2.getTextSize(lang_goal, font, font_scale, font_thickness)[0]
-    #             lang_textX = (image_size[0] - lang_textsize[0]) // 2
-
-    #             frame = cv2.putText(frame, lang_goal, org=(lang_textX, image_size[1] - 35),
-    #                                 fontScale=font_scale, fontFace=font, color=(0, 0, 0),
-    #                                 thickness=font_thickness, lineType=cv2.LINE_AA)
-                
-
-    #         video.write(frame)
-    #     video.release()
-    #     self._current_snaps = []
     
     def save(self, path, lang_goal, reward):
         print(f"Converting to video ... {path}")
@@ -132,118 +95,183 @@ class TaskRecorder(object):
         self._current_snaps = []
         logging.info(f"Cleared {num_snaps} snapshots to free memory")
 
+    def _get_env_overlay_state(self):
+        if self._env is None:
+            return {}
+        if hasattr(self._env, "get_env_overlay_state"):
+            return self._env.get_env_overlay_state()
+        inner_env = getattr(self._env, "env", None)
+        if inner_env is not None and hasattr(inner_env, "get_env_overlay_state"):
+            return inner_env.get_env_overlay_state()
+        return {}
+
     def _apply_overlay(self, frame_rgb, obs: Observation):
         cfg = self._overlay_cfg
         if cfg is None or not bool(getattr(cfg, "overlay_enabled", False)):
             return frame_rgb
-        if self._env is None or not hasattr(self._env, "_last_pred_info"):
+        if getattr(cfg, "overlay_source", "env") != "env":
             return frame_rgb
-        pred_info = getattr(self._env, "_last_pred_info")
-        if not pred_info:
+
+        state = self._get_env_overlay_state()
+        if not state:
             return frame_rgb
 
         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-        strategy_name = pred_info.get("strategy_name")
-        phase_name = pred_info.get("phase_name")
-        if strategy_name or phase_name:
-            text = "Strategy: %s | Phase: %s" % (
-                strategy_name or "N/A", phase_name or "N/A"
-            )
-            cv2.putText(
-                frame_bgr, text, (20, 40),
-                cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
-            )
+        self._draw_state_text(frame_bgr, state)
 
-        pip_cam = getattr(cfg, "overlay_pip_camera", None)
-        if pip_cam:
-            cam_key = f"{pip_cam}_rgb"
-            cam_img = None
-            pred_obs = getattr(self._env, "_last_pred_obs_dict", None)
-            if pred_obs is not None and cam_key in pred_obs:
-                cam_img = pred_obs.get(cam_key)
-                if isinstance(cam_img, np.ndarray) and cam_img.ndim == 3 and cam_img.shape[0] == 3 and cam_img.shape[-1] != 3:
-                    cam_img = np.transpose(cam_img, (1, 2, 0))
-            else:
-                cam_img = getattr(obs, "perception_data", {}).get(cam_key)
-            if cam_img is not None:
-                if cam_img.dtype != np.uint8:
-                    cam_img = (cam_img * 255.).astype(np.uint8)
-                cam_bgr = cv2.cvtColor(cam_img, cv2.COLOR_RGB2BGR)
+        points_3d = state.get("points_3d", {}) or {}
+        draw_keypoints = bool(getattr(cfg, "overlay_draw_keypoints", True))
+        draw_grippers = bool(getattr(cfg, "overlay_draw_grippers", True))
+        for name, point in points_3d.items():
+            if name in ("contact", "grasp", "affordance") and not draw_keypoints:
+                continue
+            if name in ("left_tip", "right_tip") and not draw_grippers:
+                continue
+            uv, visible = self._project_world_to_camera(point)
+            if visible:
+                self._draw_marker(frame_bgr, name, uv)
 
-                kp_by_cam = pred_info.get("keypoints_2d", {})
-                kp_cam = kp_by_cam.get(pip_cam, {})
-                pred_img_size = pred_info.get("img_size")
-                h_cam, w_cam = cam_bgr.shape[:2]
-                if pred_img_size:
-                    sx = w_cam / float(pred_img_size)
-                    sy = h_cam / float(pred_img_size)
-                else:
-                    sx = sy = 1.0
-
-                aff_vis = pred_info.get("affordance_visible")
-                kp_colors = {
-                    "contact": (0, 0, 255),     # red
-                    "grasp": (0, 255, 0),       # green
-                    "affordance": (255, 0, 0),  # blue
-                }
-                for kp_name, color in kp_colors.items():
-                    if kp_name == "affordance" and aff_vis is not None and aff_vis < 0.5:
-                        continue
-                    coords = kp_cam.get(kp_name)
-                    if coords is None or len(coords) != 2:
-                        continue
-                    u = int(max(0, min(w_cam - 1, coords[0] * sx)))
-                    v = int(max(0, min(h_cam - 1, coords[1] * sy)))
-                    cv2.circle(cam_bgr, (u, v), 4, color, -1)
-
-                scale = float(getattr(cfg, "overlay_pip_scale", 0.35))
-                margin = 16
-                pip_w = int(frame_bgr.shape[1] * scale)
-                pip_h = int(pip_w * (h_cam / float(w_cam)))
-                pip_w = max(1, min(pip_w, frame_bgr.shape[1] - 2 * margin))
-                pip_h = max(1, min(pip_h, frame_bgr.shape[0] - 2 * margin))
-                pip_img = cv2.resize(cam_bgr, (pip_w, pip_h))
-
-                x = frame_bgr.shape[1] - pip_w - margin
-                y = frame_bgr.shape[0] - pip_h - margin
-                frame_bgr[y:y + pip_h, x:x + pip_w] = pip_img
-                cv2.rectangle(
-                    frame_bgr, (x - 2, y - 2), (x + pip_w + 2, y + pip_h + 2),
-                    (255, 255, 255), 2
-                )
+        if bool(getattr(cfg, "overlay_draw_xyz_table", False)):
+            self._draw_xyz_table(frame_bgr, points_3d, draw_keypoints, draw_grippers)
 
         return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
+    def _draw_state_text(self, frame_bgr, state):
+        phase_progress = state.get("phase_progress") or {}
+        phase = int(phase_progress.get("current_phase", 1))
+        phase_name = phase_progress.get("current_phase_name", "PreManipulation")
+        strategy_name = state.get("strategy_name", "Unknown")
+        text_parts = [strategy_name, f"{phase} {phase_name}"]
+        if bool(getattr(self._overlay_cfg, "overlay_draw_gt_arm_scheme", True)):
+            gt_label = self._format_gt_arm_scheme_label(state)
+            if gt_label:
+                text_parts.append(gt_label)
+        text = " | ".join(text_parts)
+        self._draw_text_with_shadow(
+            frame_bgr, text, (20, 40), cv2.FONT_HERSHEY_DUPLEX, 0.8,
+            (255, 255, 255), 2
+        )
 
-    # def save_prediction(self, path, lang_goal, reward):
-    #     print(f"Converting to video ... {path}")
-    #     os.makedirs(os.path.dirname(path), exist_ok=True)
-    #     # OpenCV QT version can conflict with PyRep, so import here
-    #     import cv2
-    #     image_size = self._cam_motion.cam.get_resolution()
-    #     video = cv2.VideoWriter(
-    #             path, cv2.VideoWriter_fourcc('m', 'p', '4', 'v'), 2,
-    #             tuple(image_size))
-        
-    #     for image in self._prediction_snaps:
-    #         frame = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    @staticmethod
+    def _format_gt_arm_scheme_label(state):
+        scheme = state.get("gt_arm_scheme", "unknown")
+        roles = state.get("gt_arm_roles", {}) or {}
+        grasper = roles.get("grasper")
+        if isinstance(grasper, str):
+            grasper = grasper.lower()
 
-    #         font = cv2.FONT_HERSHEY_DUPLEX
-    #         font_scale = (0.45 * image_size[0]) / 640
-    #         font_thickness = 2
+        if grasper is None:
+            if scheme == "right_grasper":
+                grasper = "right"
+            elif scheme == "left_grasper":
+                grasper = "left"
 
+        if grasper == "right":
+            return "GT: R grasp"
+        if grasper == "left":
+            return "GT: L grasp"
+        return ""
 
-    #         if lang_goal:
+    def _project_world_to_camera(self, point_3d):
+        try:
+            cam = self._cam_motion.cam
+            extrinsic = self._coerce_extrinsic(cam.get_matrix())
+            intrinsic = self._coerce_intrinsic(cam.get_intrinsic_matrix())
+            width, height = [int(v) for v in cam.get_resolution()]
 
-    #             lang_textsize = cv2.getTextSize(lang_goal, font, font_scale, font_thickness)[0]
-    #             lang_textX = (image_size[0] - lang_textsize[0]) // 2
+            R = extrinsic[:3, :3]
+            C = extrinsic[:3, 3:4]
+            R_inv = R.T
+            extrinsics_w2c = np.concatenate([R_inv, -(R_inv @ C)], axis=-1)
+            proj = intrinsic @ extrinsics_w2c
 
-    #             frame = cv2.putText(frame, lang_goal, org=(lang_textX, image_size[1] - 35),
-    #                                 fontScale=font_scale, fontFace=font, color=(0, 0, 0),
-    #                                 thickness=font_thickness, lineType=cv2.LINE_AA)
-                
+            p = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0], dtype=np.float64)
+            q = proj @ p
+            if q[2] <= 1e-6:
+                return np.array([-1.0, -1.0]), False
 
-    #         video.write(frame)
-    #     video.release()
-    #     self._prediction_snaps = []
+            u = q[0] / q[2]
+            v = q[1] / q[2]
+            visible = 0 <= u < width and 0 <= v < height
+            return np.array([u, v]), visible
+        except Exception as exc:
+            logging.debug("Failed to project overlay point: %s", exc)
+            return np.array([-1.0, -1.0]), False
+
+    @staticmethod
+    def _coerce_extrinsic(matrix):
+        matrix = np.asarray(matrix, dtype=np.float64)
+        if matrix.shape == (4, 4):
+            return matrix
+        if matrix.shape == (3, 4):
+            return np.vstack([matrix, np.array([0.0, 0.0, 0.0, 1.0])])
+        if matrix.size == 16:
+            return matrix.reshape(4, 4)
+        if matrix.size == 12:
+            matrix = matrix.reshape(3, 4)
+            return np.vstack([matrix, np.array([0.0, 0.0, 0.0, 1.0])])
+        raise ValueError(f"Unexpected camera extrinsic shape: {matrix.shape}")
+
+    @staticmethod
+    def _coerce_intrinsic(matrix):
+        matrix = np.asarray(matrix, dtype=np.float64)
+        if matrix.shape == (3, 3):
+            return matrix
+        if matrix.size == 9:
+            return matrix.reshape(3, 3)
+        raise ValueError(f"Unexpected camera intrinsic shape: {matrix.shape}")
+
+    def _draw_marker(self, frame_bgr, name, uv):
+        styles = {
+            "contact": ((0, 0, 255), "contact"),
+            "grasp": ((0, 255, 0), "grasp"),
+            "affordance": ((255, 0, 0), "afford"),
+            "left_tip": ((0, 255, 255), "left"),
+            "right_tip": ((255, 0, 255), "right"),
+        }
+        color, label = styles.get(name, ((255, 255, 255), name))
+        u = int(round(float(uv[0])))
+        v = int(round(float(uv[1])))
+        cv2.circle(frame_bgr, (u, v), 7, color, -1)
+        cv2.circle(frame_bgr, (u, v), 9, (255, 255, 255), 1)
+        self._draw_text_with_shadow(
+            frame_bgr, label, (u + 10, v - 8), cv2.FONT_HERSHEY_DUPLEX, 0.48,
+            (255, 255, 255), 1
+        )
+
+    def _draw_xyz_table(self, frame_bgr, points_3d, draw_keypoints, draw_grippers):
+        rows = []
+        for name in ("contact", "grasp", "affordance", "left_tip", "right_tip"):
+            if name in ("contact", "grasp", "affordance") and not draw_keypoints:
+                continue
+            if name in ("left_tip", "right_tip") and not draw_grippers:
+                continue
+            point = points_3d.get(name)
+            if point is None:
+                continue
+            rows.append(f"{name}: {point[0]:.2f} {point[1]:.2f} {point[2]:.2f}")
+
+        if not rows:
+            return
+
+        margin = 20
+        line_height = 22
+        x = max(margin, frame_bgr.shape[1] - 360)
+        y = margin + 20
+        for i, row in enumerate(rows):
+            self._draw_text_with_shadow(
+                frame_bgr, row, (x, y + i * line_height),
+                cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 1
+            )
+
+    @staticmethod
+    def _draw_text_with_shadow(frame_bgr, text, org, font, scale, color, thickness):
+        x, y = org
+        cv2.putText(
+            frame_bgr, text, (x + 1, y + 1), font, scale, (0, 0, 0),
+            thickness + 2, cv2.LINE_AA
+        )
+        cv2.putText(
+            frame_bgr, text, org, font, scale, color, thickness, cv2.LINE_AA
+        )

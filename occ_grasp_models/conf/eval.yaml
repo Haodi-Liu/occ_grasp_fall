@@ -1,13 +1,13 @@
 defaults:
-    - method: BIMANUAL_PERACT
+    - method: ACT_BC_VISION
 
 
 rlbench:
     task_name: "multi"
-    tasks: [bimanual_pick_plate]
-    demo_path: /mnt/rlbench_data
-    episode_length: 40  # Must match training for time_in_state consistency
-    cameras: ["over_shoulder_left", "over_shoulder_right", "overhead", "wrist_right", "wrist_left", "front"]
+    tasks: [bimanual_pick_plate,bimanual_pick_fork,bimanual_edge_phone,bimanual_pivot_phone]
+    demo_path: /raid/hdliu_raid/datasets/rlbench_data
+    episode_length: 400  # Must match training for time_in_state consistency
+    cameras: ["overhead"]
     camera_resolution: [256, 256]
     scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6]
     include_lang_goal_in_obs: True
@@ -24,8 +24,8 @@ framework:
     tensorboard_logging: True
     csv_logging: True
     gpu: 0
-    logdir: '/home/hdliu/arm_test/bimanual_pick_plate'
-    start_seed: 2
+    logdir: '/raid/hdliu_raid/arm_test/bimanual_four_task'
+    start_seed: 0
     record_every_n: 20
 
     eval_envs: 1
@@ -36,24 +36,18 @@ framework:
 
 cinematic_recorder:
     enabled: True
-    max_success_videos: 10  # Maximum number of successful episodes to record
-    max_fail_videos: 10     # Maximum number of failed episodes to record
+    max_success_videos: 30  # Maximum number of successful episodes to record
+    max_fail_videos: 30     # Maximum number of failed episodes to record
     camera_resolution: [1280, 720]
     fps: 30
     rotate_speed: 0.005
-    save_path: '/home/hdliu/arm_test/bimanual_pick_plate/multi/BIMANUAL_PERACT/seed2'
+    save_path: '/raid/hdliu_raid/arm_test/bimanual_four_task/multi/ACT_BC_VISION/seed0'
     overlay_enabled: True
-    overlay_pip_camera: "over_shoulder_right"
-    overlay_pip_scale: 0.35
-
-aux_eval:
-    enabled: true
-    log_every_n_steps: 5
-    sample_every_n_steps: 10
-    max_samples_per_episode: 6
-    sample_camera: "over_shoulder_right"
-    save_path: "${cinematic_recorder.save_path}/aux_eval_samples"
-    sample_min_width: 300
+    overlay_source: "env"
+    overlay_draw_keypoints: True
+    overlay_draw_grippers: True
+    overlay_draw_gt_arm_scheme: True
+    overlay_draw_xyz_table: False
 
 # C1 在线回流采集配置（新增）
 dagger_collect:

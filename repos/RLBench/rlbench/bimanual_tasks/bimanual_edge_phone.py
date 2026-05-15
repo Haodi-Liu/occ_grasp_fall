@@ -38,6 +38,7 @@ PHASE_NAMES = {
     2: "Grasp",            # 抓取：抓住悬空部分
     3: "ClearPath",        # 清道：辅助臂移开
     4: "Lift",             # 拿起：抬起手机
+    5: "Complete",         # 四阶段全部完成
 }
 
 
@@ -163,7 +164,6 @@ class ClearPathCondition(Condition):
     成功条件：
     1. 辅助臂夹爪已松开物体
     2. 辅助臂夹爪tip与目标物体保持足够距离
-    3. 辅助臂tip与抓取臂后续所有路径点保持足够距离
     """
 
     def __init__(self,
@@ -175,6 +175,7 @@ class ClearPathCondition(Condition):
         self.aux_gripper = aux_gripper
         self.target_object = target_object
         self.aux_tip_dummy = aux_tip_dummy
+        # 保留参数兼容旧调用；online 评估不再依赖预设 lift waypoint。
         self.lift_waypoints = lift_waypoints or []
         self.min_clearance = min_clearance
 
@@ -191,13 +192,6 @@ class ClearPathCondition(Condition):
 
         if distance_to_target < self.min_clearance:
             return False, False
-
-        # 检查与所有后续路径点的距离
-        for wp_dummy in self.lift_waypoints:
-            wp_pos = np.array(wp_dummy.get_position())
-            distance_to_wp = np.linalg.norm(aux_tip_pos - wp_pos)
-            if distance_to_wp < self.min_clearance:
-                return False, False
 
         return True, False
 
@@ -513,56 +507,87 @@ class PhasedSuccessEvaluator:
     分阶段成功条件评估器。
 
     特点：
-    - 每个阶段的成功条件累积包含之前阶段的条件
-    - 一个阶段的圆满完成预示着下一阶段的开始
-    - 使用整数标签表示阶段 (1, 2, 3, 4)
+    - current_phase 表示正在尝试的阶段；5 表示四阶段全部完成
+    - 在线评估中阶段可回退，但 max_current_phase_reached 只前进
+    - 每个仿真 step 中每个 condition 只采样一次
     """
 
-    def __init__(self, phase_conditions: Dict[int, List[Condition]]):
-        self.phase_conditions = phase_conditions
-        self.num_phases = len(phase_conditions)
+    def __init__(self, stage_conditions: Dict[int, Condition]):
+        self.stage_conditions = stage_conditions
+        self.num_phases = 4
         self.current_phase = 1
+        self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
+        self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
 
     def reset(self):
         """重置评估器状态"""
         self.current_phase = 1
+        self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
-        for conditions in self.phase_conditions.values():
-            for cond in conditions:
-                if hasattr(cond, 'reset'):
-                    cond.reset()
+        self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
+        for cond in self.stage_conditions.values():
+            if hasattr(cond, 'reset'):
+                cond.reset()
+
+    def _sample_conditions_once(self) -> Dict[int, bool]:
+        status = {}
+        for phase_id in range(1, self.num_phases + 1):
+            cond = self.stage_conditions.get(phase_id)
+            status[phase_id] = bool(cond.condition_met()[0]) if cond is not None else False
+        self._last_condition_status = status
+        return status
+
+    def _maintenance_met(self, phase: int, cond: Dict[int, bool]) -> bool:
+        if phase == 1:
+            return True
+        if phase == 2:
+            return cond[1]
+        if phase in (3, 4):
+            return cond[2]
+        return True
+
+    def _transition_met(self, phase: int, cond: Dict[int, bool]) -> bool:
+        if phase == 1:
+            return cond[1]
+        if phase == 2:
+            return cond[1] and cond[2]
+        if phase == 3:
+            return cond[2] and cond[3]
+        if phase == 4:
+            return cond[2] and cond[4]
+        return False
 
     def evaluate_current_phase(self) -> Tuple[bool, int]:
-        """评估当前阶段是否完成
+        """按在线状态机推进当前阶段。"""
+        old_phase = self.current_phase
 
-        修复：一次调用中评估所有可完成的阶段，避免因跳帧导致阶段漏记录
-        """
-        if self.current_phase > self.num_phases:
-            return True, self.num_phases
+        if self.current_phase >= 5:
+            return False, self.num_phases
 
-        any_completed = False
-        last_completed_phase = 0
+        cond = self._sample_conditions_once()
 
-        while self.current_phase <= self.num_phases:
-            conditions = self.phase_conditions.get(self.current_phase, [])
-            all_met = all(cond.condition_met()[0] for cond in conditions)
+        if not self._maintenance_met(self.current_phase, cond):
+            self.current_phase = 1
 
-            if all_met:
-                self._phase_completion_status[self.current_phase] = True
-                last_completed_phase = self.current_phase
-                self.current_phase += 1
-                any_completed = True
-            else:
-                break
+        while self.current_phase <= self.num_phases and self._transition_met(self.current_phase, cond):
+            self.current_phase += 1
 
-        if any_completed:
-            return True, last_completed_phase
-        return False, self.current_phase
+        self.max_current_phase_reached = max(
+            self.max_current_phase_reached, self.current_phase
+        )
+        for phase_id in range(1, self.num_phases + 1):
+            self._phase_completion_status[phase_id] = (
+                self.max_current_phase_reached > phase_id
+            )
+
+        changed = self.current_phase != old_phase
+        completed_phase = min(max(self.current_phase - 1, 0), self.num_phases)
+        return changed, completed_phase
 
     def get_current_phase(self) -> int:
         """获取当前阶段ID"""
-        return min(self.current_phase, self.num_phases)
+        return self.current_phase
 
     def is_phase_completed(self, phase_id: int) -> bool:
         """检查指定阶段是否已完成"""
@@ -570,15 +595,19 @@ class PhasedSuccessEvaluator:
 
     def is_task_successful(self) -> bool:
         """检查任务是否整体成功"""
-        return self.current_phase > self.num_phases
+        return self.current_phase >= 5
 
     def get_phase_progress(self) -> Dict:
         """获取阶段进度信息（用于评估时记录）"""
         return {
-            'current_phase': self.get_current_phase(),
+            'current_phase': self.current_phase,
+            'current_phase_name': PHASE_NAMES.get(self.current_phase, "Unknown"),
+            'max_current_phase_reached': self.max_current_phase_reached,
+            'max_completed_phase': max(self.max_current_phase_reached - 1, 0),
             'total_phases': self.num_phases,
             'completed': self.is_task_successful(),
-            'phase_status': self._phase_completion_status.copy()
+            'phase_status': self._phase_completion_status.copy(),
+            'condition_status': self._last_condition_status.copy(),
         }
 
 
@@ -652,7 +681,7 @@ class BimanualEdgePhone(BimanualTask):
 
         # 注册最终成功条件
         self.register_success_conditions([
-            LiftedCondition(self.target_object, min_height=1.1)
+            LiftedCondition(self.target_object, min_height=1)
         ])
 
     def _get_active_waypoints(self) -> Dict[str, List[str]]:
@@ -708,46 +737,29 @@ class BimanualEdgePhone(BimanualTask):
         if Object.exists(lift_wp_name):
             lift_waypoints.append(Dummy(lift_wp_name))
 
-        # ====== 阶段条件定义 ======
-        # Phase 1: 悬空条件
-        phase1_conditions = [
-            EdgeOverhangCondition(
-                self.target_object, self.box_edge, self.phone_edge,
-                min_overhang=0.05, velocity_threshold=0.2, required_stable_frames=3
-            )
-        ]
-
-        # 共享的稳定抓取条件
-        stable_grasp_condition = StableGraspCondition(
+        # ====== 单独阶段条件定义 ======
+        con1 = EdgeOverhangCondition(
+            self.target_object, self.box_edge, self.phone_edge,
+            min_overhang=0.03, velocity_threshold=0.2, required_stable_frames=3
+        )
+        con2 = StableGraspCondition(
             grasper_gripper, self.target_object,
             velocity_threshold=0.1, required_stable_frames=3
         )
+        con3 = ClearPathCondition(
+            pusher_gripper, self.target_object, pusher_tip,
+            lift_waypoints=lift_waypoints, min_clearance=0.2
+        )
+        con4 = LiftedCondition(self.target_object, min_height=1)
 
-        # Phase 2: 稳定抓取
-        phase2_conditions = [stable_grasp_condition]
-
-        # Phase 3: 持续抓取 + 清道
-        phase3_conditions = [
-            stable_grasp_condition,
-            ClearPathCondition(
-                pusher_gripper, self.target_object, pusher_tip,
-                lift_waypoints=lift_waypoints, min_clearance=0.34
-            )
-        ]
-
-        # Phase 4: 抬起
-        phase4_conditions = [
-            LiftedCondition(self.target_object, min_height=1.1)
-        ]
-
-        phase_conditions = {
-            1: phase1_conditions,
-            2: phase2_conditions,
-            3: phase3_conditions,
-            4: phase4_conditions
+        stage_conditions = {
+            1: con1,
+            2: con2,
+            3: con3,
+            4: con4,
         }
 
-        self.phased_evaluator = PhasedSuccessEvaluator(phase_conditions)
+        self.phased_evaluator = PhasedSuccessEvaluator(stage_conditions)
         logging.info("PhasedSuccessEvaluator initialized successfully")
 
     def init_episode(self, index: int) -> List[str]:
@@ -896,8 +908,11 @@ class BimanualEdgePhone(BimanualTask):
     def get_phase_progress(self) -> Dict:
         """获取阶段进度信息"""
         if self.phased_evaluator is None:
-            return {'current_phase': 1, 'total_phases': 4, 'completed': False,
-                    'phase_status': {1: False, 2: False, 3: False, 4: False}}
+            return {'current_phase': 1, 'current_phase_name': PHASE_NAMES[1],
+                    'max_current_phase_reached': 1, 'max_completed_phase': 0,
+                    'total_phases': 4, 'completed': False,
+                    'phase_status': {1: False, 2: False, 3: False, 4: False},
+                    'condition_status': {1: False, 2: False, 3: False, 4: False}}
         return self.phased_evaluator.get_phase_progress()
 
     def get_role_assignment(self) -> Dict[str, str]:

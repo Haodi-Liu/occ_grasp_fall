@@ -19,11 +19,123 @@ from yarr.utils.process_str import change_case
 from pyrep.const import RenderMode
 from pyrep.errors import IKError, ConfigurationPathError
 from pyrep.objects import VisionSensor, Dummy
+from pyrep.objects.object import Object
 
 import logging
 import os
 from pdb import set_trace
 from helpers.aux_eval_visualizer import render_aux_eval_like
+
+STRATEGY_NAMES = {
+    1: "EdgeHang",
+    2: "WallLever",
+    3: "PressTilt",
+}
+
+OVERLAY_POINT_CANDIDATES = {
+    "contact": ("push_pt", "press_pt"),
+    "grasp": ("grasp_pt",),
+    "affordance": ("box_edge", "wall_pivot"),
+    "left_tip": ("Panda_leftArm_tip",),
+    "right_tip": ("Panda_rightArm_tip",),
+}
+
+GT_ARM_SCHEME_ROLES = {
+    "left_grasper": {"grasper": "left", "pusher": "right"},
+    "right_grasper": {"grasper": "right", "pusher": "left"},
+}
+
+
+def _roles_from_gt_arm_scheme(scheme: str) -> Dict[str, str]:
+    return GT_ARM_SCHEME_ROLES.get(scheme, {}).copy()
+
+
+def _lookup_gt_arm_scheme(dataset_root: str, task_name: str, episode_number: int) -> str:
+    if not dataset_root or not task_name or episode_number < 0:
+        return "unknown"
+
+    episode_path = os.path.join(
+        dataset_root, task_name, "all_variations", "episodes",
+        f"episode{episode_number}"
+    )
+    try:
+        if not os.path.isdir(episode_path):
+            return "unknown"
+        for scheme in ("left_grasper", "right_grasper"):
+            if os.path.exists(os.path.join(episode_path, f"scheme_info_{scheme}.pkl")):
+                return scheme
+        for filename in sorted(os.listdir(episode_path)):
+            if filename.startswith("scheme_info_") and filename.endswith(".pkl"):
+                return filename.replace("scheme_info_", "").replace(".pkl", "")
+    except Exception as exc:
+        logging.debug("Failed to lookup GT arm scheme for %s episode %s: %s",
+                      task_name, episode_number, exc)
+    return "unknown"
+
+
+def _get_active_task_name(env) -> str:
+    if hasattr(env, "_task_class"):
+        return change_case(env._task_class.__name__)
+    if hasattr(env, "_task_classes") and getattr(env, "active_task_id", -1) >= 0:
+        task_id = env.active_task_id % len(env._task_classes)
+        return change_case(env._task_classes[task_id].__name__)
+
+    task_env = getattr(env, "_task", None)
+    task = getattr(task_env, "_task", None)
+    if task is not None:
+        return change_case(task.__class__.__name__)
+    return ""
+
+
+def _clear_gt_arm_scheme_state(env) -> None:
+    env._current_gt_arm_scheme = "unknown"
+    env._current_gt_arm_roles = {}
+    env._current_gt_arm_task_name = ""
+
+
+def _update_gt_arm_scheme_state(env, episode_number: int) -> None:
+    task_name = _get_active_task_name(env)
+    dataset_root = getattr(getattr(env, "_rlbench_env", None), "_dataset_root", "")
+    scheme = _lookup_gt_arm_scheme(dataset_root, task_name, episode_number)
+    env._current_gt_arm_scheme = scheme
+    env._current_gt_arm_roles = _roles_from_gt_arm_scheme(scheme)
+    env._current_gt_arm_task_name = task_name
+
+
+def _get_gt_arm_overlay_state(env, task) -> Tuple[str, Dict[str, str]]:
+    scheme = getattr(env, "_current_gt_arm_scheme", "unknown")
+    roles = dict(getattr(env, "_current_gt_arm_roles", {}) or {})
+
+    if scheme == "unknown" and task is not None and hasattr(task, "get_active_scheme"):
+        try:
+            scheme = task.get_active_scheme()
+        except Exception as exc:
+            logging.debug("Failed to read active arm scheme from task: %s", exc)
+
+    if not roles and task is not None and hasattr(task, "get_role_assignment"):
+        try:
+            roles = task.get_role_assignment()
+        except Exception as exc:
+            logging.debug("Failed to read arm roles from task: %s", exc)
+
+    if not roles:
+        roles = _roles_from_gt_arm_scheme(scheme)
+    return scheme, roles
+
+
+def _collect_env_overlay_points_3d() -> Dict[str, np.ndarray]:
+    points = {}
+    for point_name, dummy_names in OVERLAY_POINT_CANDIDATES.items():
+        for dummy_name in dummy_names:
+            try:
+                if Object.exists(dummy_name):
+                    points[point_name] = np.array(
+                        Dummy(dummy_name).get_position(), dtype=np.float32
+                    )
+                    break
+            except Exception as exc:
+                logging.debug("Failed to collect overlay point %s: %s", dummy_name, exc)
+    return points
 
 
 class CustomRLBenchEnv(RLBenchEnv):
@@ -72,9 +184,9 @@ class CustomRLBenchEnv(RLBenchEnv):
         self._last_exception = None
         # ===== 新增：用于 scheme 分层评估的 episode 编号追踪 =====
         self._current_episode_number = -1
-        # ===== 用于可视化：保存最新预测信息 =====
+        _clear_gt_arm_scheme_state(self)
+        # ===== 用于 aux_eval / 回流采集：保存最新预测信息 =====
         self._last_pred_info = None
-        self._last_pred_obs_dict = None
         # ===== AUX_EVAL =====
         self._aux_eval_cfg = aux_eval_cfg
         self._dagger_collect_cfg = dagger_collect_cfg
@@ -297,6 +409,8 @@ class CustomRLBenchEnv(RLBenchEnv):
 
     def reset(self) -> dict:
         self._i = 0
+        self._current_episode_number = -1
+        _clear_gt_arm_scheme_state(self)
         self._previous_obs_dict = super(CustomRLBenchEnv, self).reset()
         self._record_current_episode = (
             self.eval and self._episode_index % self._record_every_n == 0
@@ -304,7 +418,6 @@ class CustomRLBenchEnv(RLBenchEnv):
         self._episode_index += 1
         self._recorded_images.clear()
         self._last_pred_info = None
-        self._last_pred_obs_dict = None
         self._aux_eval_step = 0
         self._aux_eval_sample_count = 0
         self._aux_eval_phase_counts = None
@@ -313,7 +426,15 @@ class CustomRLBenchEnv(RLBenchEnv):
     def register_callback(self, func):
         self._task._scene.register_step_callback(func)
 
+    def _update_phase_evaluation(self) -> Tuple[bool, int]:
+        task = self._task._task if self._task is not None else None
+        if task is not None and hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
+            return task.phased_evaluator.evaluate_current_phase()
+        return False, 0
+
     def _my_callback(self):
+        self._update_phase_evaluation()
+
         if self._record_current_episode:
             self._record_cam.handle_explicitly()
             cap = (self._record_cam.capture_rgb() * 255).astype(np.uint8)
@@ -391,9 +512,6 @@ class CustomRLBenchEnv(RLBenchEnv):
 
         if act_result is not None and act_result.info:
             self._last_pred_info = act_result.info.get("pred_info")
-
-        # Cache the observation used for prediction to align overlay timing.
-        self._last_pred_obs_dict = self._previous_obs_dict
 
         if self._previous_obs_dict is not None:
             dagger_on = (
@@ -481,22 +599,42 @@ class CustomRLBenchEnv(RLBenchEnv):
             return task.get_phase_progress()
         return None
 
+    def _collect_overlay_points_3d(self) -> Dict[str, np.ndarray]:
+        return _collect_env_overlay_points_3d()
+
+    def get_env_overlay_state(self) -> Dict:
+        """
+        获取 cinematic recorder 所需的环境真实状态。
+
+        该接口只读取任务真实状态和 CoppeliaSim dummy，不读取模型预测信息。
+        """
+        task = self._task._task if self._task is not None else None
+        if task is None:
+            return {}
+
+        phase_progress = None
+        if hasattr(task, 'get_phase_progress'):
+            phase_progress = task.get_phase_progress()
+
+        strategy_type = getattr(task, 'STRATEGY_TYPE', 1)
+        gt_arm_scheme, gt_arm_roles = _get_gt_arm_overlay_state(self, task)
+        return {
+            'strategy_type': strategy_type,
+            'strategy_name': STRATEGY_NAMES.get(strategy_type, "Unknown"),
+            'phase_progress': phase_progress,
+            'gt_arm_scheme': gt_arm_scheme,
+            'gt_arm_roles': gt_arm_roles,
+            'points_3d': self._collect_overlay_points_3d(),
+        }
+
     def evaluate_current_phase(self) -> Tuple[bool, int]:
         """
-        评估当前阶段是否完成
+        按在线阶段状态机推进一次真实阶段状态
 
         Returns:
-            (phase_completed, completed_phase): 阶段是否刚完成及刚完成的阶段ID
-
-        注意：当 phase_completed=True 时，返回的第二个值是刚完成的阶段编号，不需要再 -1
+            (phase_changed, max_completed_phase): 当前阶段是否变化，以及按当前状态推导的最大完成阶段
         """
-        if self._task is None or self._task._task is None:
-            return False, 1
-
-        task = self._task._task
-        if hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
-            return task.phased_evaluator.evaluate_current_phase()
-        return False, 1
+        return self._update_phase_evaluation()
 
     def get_strategy_and_phase(self) -> Tuple[int, int]:
         """
@@ -522,12 +660,12 @@ class CustomRLBenchEnv(RLBenchEnv):
         self._i = 0
         # ===== 新增：记录当前 episode 编号用于 scheme 查询 =====
         self._current_episode_number = i
+        _update_gt_arm_scheme_state(self, i)
         # super(CustomRLBenchEnv, self).reset()
         self._aux_eval_step = 0
         self._aux_eval_sample_count = 0
         self._aux_eval_phase_counts = None
         self._last_pred_info = None
-        self._last_pred_obs_dict = None
 
         for attempt in range(max_attempts):
             try:
@@ -629,9 +767,9 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         self._last_exception = None
         # ===== 新增：用于 scheme 分层评估的 episode 编号追踪 =====
         self._current_episode_number = -1
-        # ===== 用于可视化：保存最新预测信息 =====
+        _clear_gt_arm_scheme_state(self)
+        # ===== 用于 aux_eval / 回流采集：保存最新预测信息 =====
         self._last_pred_info = None
-        self._last_pred_obs_dict = None
         # ===== AUX_EVAL =====
         self._aux_eval_cfg = aux_eval_cfg
         self._dagger_collect_cfg = dagger_collect_cfg
@@ -850,6 +988,8 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
 
     def reset(self) -> dict:
         self._i = 0
+        self._current_episode_number = -1
+        _clear_gt_arm_scheme_state(self)
         self._previous_obs_dict = super(CustomMultiTaskRLBenchEnv, self).reset()
         self._record_current_episode = (
             self.eval and self._episode_index % self._record_every_n == 0
@@ -857,7 +997,6 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         self._episode_index += 1
         self._recorded_images.clear()
         self._last_pred_info = None
-        self._last_pred_obs_dict = None
         self._aux_eval_step = 0
         self._aux_eval_sample_count = 0
         self._aux_eval_phase_counts = None
@@ -866,7 +1005,15 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
     def register_callback(self, func):
         self._task._scene.register_step_callback(func)
 
+    def _update_phase_evaluation(self) -> Tuple[bool, int]:
+        task = self._task._task if self._task is not None else None
+        if task is not None and hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
+            return task.phased_evaluator.evaluate_current_phase()
+        return False, 0
+
     def _my_callback(self):
+        self._update_phase_evaluation()
+
         if self._record_current_episode:
             self._record_cam.handle_explicitly()
             cap = (self._record_cam.capture_rgb() * 255).astype(np.uint8)
@@ -885,9 +1032,6 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         action = act_result.action
         if act_result is not None and act_result.info:
             self._last_pred_info = act_result.info.get("pred_info")
-
-        # Cache the observation used for prediction to align overlay timing.
-        self._last_pred_obs_dict = self._previous_obs_dict
 
         if self._previous_obs_dict is not None:
             dagger_on = (
@@ -972,14 +1116,33 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
             return task.get_phase_progress()
         return None
 
-    def evaluate_current_phase(self) -> Tuple[bool, int]:
-        if self._task is None or self._task._task is None:
-            return False, 1
+    def _collect_overlay_points_3d(self) -> Dict[str, np.ndarray]:
+        return _collect_env_overlay_points_3d()
 
-        task = self._task._task
-        if hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
-            return task.phased_evaluator.evaluate_current_phase()
-        return False, 1
+    def get_env_overlay_state(self) -> Dict:
+        """获取 cinematic recorder 所需的环境真实状态。"""
+        task = self._task._task if self._task is not None else None
+        if task is None:
+            return {}
+
+        phase_progress = None
+        if hasattr(task, 'get_phase_progress'):
+            phase_progress = task.get_phase_progress()
+
+        strategy_type = getattr(task, 'STRATEGY_TYPE', 1)
+        gt_arm_scheme, gt_arm_roles = _get_gt_arm_overlay_state(self, task)
+        return {
+            'strategy_type': strategy_type,
+            'strategy_name': STRATEGY_NAMES.get(strategy_type, "Unknown"),
+            'phase_progress': phase_progress,
+            'gt_arm_scheme': gt_arm_scheme,
+            'gt_arm_roles': gt_arm_roles,
+            'points_3d': self._collect_overlay_points_3d(),
+        }
+
+    def evaluate_current_phase(self) -> Tuple[bool, int]:
+        """按在线阶段状态机推进一次真实阶段状态。"""
+        return self._update_phase_evaluation()
 
     def get_strategy_and_phase(self) -> Tuple[int, int]:
         if self._task is None or self._task._task is None:
@@ -1003,12 +1166,12 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         self._i = 0
         # ===== 新增：记录当前 episode 编号用于 scheme 查询 =====
         self._current_episode_number = i
+        _update_gt_arm_scheme_state(self, i)
         # super(CustomMultiTaskRLBenchEnv, self).reset()
         self._aux_eval_step = 0
         self._aux_eval_sample_count = 0
         self._aux_eval_phase_counts = None
         self._last_pred_info = None
-        self._last_pred_obs_dict = None
 
         # if variation_number == -1:
         #     self._task.sample_variation()

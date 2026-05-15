@@ -1,12 +1,13 @@
 # 双臂遮挡抓取演示数据收集指南
 
 **创建日期**: 2026-01-01
-**更新日期**: 2026-01-14
+**更新日期**: 2026-05-14
 **项目目标**: 为策略条件注入模型和关键点位姿注入模型提供带标签的演示数据
 
 **关联文档**:
-- [STRATEGY_MODEL_DESIGN.md](../06_misc/act_family/STRATEGY_MODEL_DESIGN.md) - 策略/阶段条件注入模型扩展
-- [KEYPOINT_POSE_INJECTION_PLAN.md](../06_misc/act_family/KEYPOINT_POSE_INJECTION_PLAN.md) - 关键点位姿预测模型扩展
+- [ONLINE_PHASE_EVAL_AND_ENV_VIS_PLAN.md](ONLINE_PHASE_EVAL_AND_ENV_VIS_PLAN.md) - PPI 在线阶段评估与环境真实状态视频可视化方案
+- [ACT_BC_KEYPOINT_AUX_EVAL_PLAN.md](../02_act_bc_vision/ACT_BC_KEYPOINT_AUX_EVAL_PLAN.md) - 在线辅助样本采集与可视化
+- [ACT_BC_KEYPOINT_STRATEGY_AUX_EVAL_PLAN.md](../02_act_bc_vision/ACT_BC_KEYPOINT_STRATEGY_AUX_EVAL_PLAN.md) - 关键点 + 策略/阶段辅助样本采集
 
 ---
 
@@ -20,7 +21,7 @@
 5B. [其他任务扩展方案](#5b-其他任务扩展方案)
 6. [训练数据加载 (launch_utils.py)](#6-训练数据加载-launch_utilspy)
 7. [验证与调试](#7-验证与调试)
-8. [评估时的阶段判断](#8-评估时的阶段判断)
+8. [在线评估与环境真实状态可视化](#8-在线评估与环境真实状态可视化)
 
 ---
 
@@ -48,6 +49,8 @@
 | 2 | 抓取 (Grasp) | 利用创造的空间抓牢物体 | 夹爪牢固抓住+保持稳定 |
 | 3 | 清道 (ClearPath) | 移开辅助臂避免阻碍 | 辅助臂不阻碍后续路径 |
 | 4 | 拿起 (Lift) | 沿预定路径拿起物体 | 物体到达目标位置 |
+
+在线评估里的 `current_phase` 表示“正在尝试的阶段”，并额外使用 `5=Complete` 表示四个阶段已经全部完成。四个执行阶段仍然只有 1-4；`5` 是终止成功状态，不是第五个任务阶段。
 
 ### 1.4 当前任务状态
 
@@ -80,7 +83,9 @@
 | 字段名 | 类型 | 说明 | 值域 |
 |--------|------|------|------|
 | `strategy_type` | int | 当前策略类型 | 1=EdgeHang, 2=WallLever, 3=PressTilt |
-| `phase_type` | int | 当前执行阶段 | 1=PreManip, 2=Grasp, 3=ClearPath, 4=Lift |
+| `phase_type` | int | 当前执行阶段 / 完成状态 | 1=PreManip, 2=Grasp, 3=ClearPath, 4=Lift, 5=Complete |
+
+`obs.misc["phase_type"]` 是 1-based 原始标签。当前 `ACT_BC_*_STRATEGY` 类加载器和 `custom_rlbench_env._append_aux_gt()` 仍按 `num_phases=4` 转成 0-based，并会把 `5=Complete` clamp 到 `3=Lift`；因此使用四阶段分类头训练时无需把 `num_phases` 改成 5。若后续模型要显式预测 Complete 状态，才需要同步扩展配置和分类头。
 
 ### 2.3 关键点位姿（语义统一命名）
 
@@ -162,7 +167,7 @@ get_demo()
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ 1. 任务定义 (bimanual_edge_phone.py)                                      │
 │    ├── STRATEGY_TYPE = 1                                                  │
-│    ├── PhasedSuccessEvaluator(phase_conditions={1:..., 2:..., 3:..., 4:})│
+│    ├── PhasedSuccessEvaluator(stage_conditions={1: con1, ..., 4: con4})   │
 │    └── evaluate_phase_and_get_labels() → (strategy_type, phase_type)     │
 └──────────────────────────────────────────────────────────────────────────┘
                                     ↓
@@ -600,26 +605,25 @@ def get_demo(self, record: bool = True, ...):
 
 **文件位置**: `/home/hdliu/occ_grasp_fall/repos/RLBench/rlbench/bimanual_tasks/bimanual_edge_phone.py`
 
-> ⚠️ **重要更新 (2026-01-05)**
+> ⚠️ **重要更新 (2026-05-14)**
 >
-> **阶段条件设计从"累积条件"改为"非累积条件"**
+> **阶段条件设计已从旧的条件列表推进，更新为 online 可回退状态机**
 >
 > **问题背景**：
-> - 之前使用累积条件（`phase2 = phase1 + new_cond`）
-> - 导致 `EdgeOverhangCondition` 在手机被抓起后失效
-> - Phase 2-4 因前置条件失效而无法被标记为完成
-> - 评估时阶段成功率会被严重低估，可能与 `return` / reward 成功统计脱节
+> - 旧 evaluator 阶段完成后只前进不回退，适合 scripted demo，但不适合 online policy 的随机行为
+> - 物体可能重新落平、抓住后掉落、辅助臂反复靠近目标物
+> - runner 和视频 callback 若同时推进 evaluator，会重复调用带 `stable_count` 的 condition
 >
 > **改动内容**：
-> - Phase 1: `[EdgeOverhangCondition]` — 一次性，完成后不再检查
-> - Phase 2: `[StableGraspCondition]` — 开始持续检查
-> - Phase 3: `[StableGraspCondition, ClearPathCondition]` — 持续检查抓取
-> - Phase 4: `[LiftedCondition]` — 只检查高度（与任务成功条件一致）
+> - `_setup_phased_evaluator()` 只构造 `con1-con4` 四个单独条件
+> - `PhasedSuccessEvaluator` 通过维持条件和转换条件显式推进 / 回退 `current_phase`
+> - `max_current_phase_reached` 和 `phase_status` 记录 episode 内最远完成状态
+> - `ClearPathCondition` 不再依赖 lift waypoint 距离
 >
 > **对已收集数据的影响**：
-> - ❌ **使用旧代码收集的数据中 `phase_type` 标签可能错误**
-> - 如果模型使用 `phase_type` 标签（如 `ACT_BC_ENC_STRATEGY`）→ **需要重新收集数据**
-> - 如果模型不使用 `phase_type` 标签（如基础 `ACT_BC_ENC`）→ 可继续使用
+> - raw `obs.misc["phase_type"]` 现在可能为 `5=Complete`
+> - 四阶段训练加载器会把 `5` clamp 到 `Lift`
+> - 如果模型显式监督 `phase_type` 且要区分 Complete，需要重新生成数据并同步扩展 `num_phases`
 
 ### 5.1 常量定义
 
@@ -677,7 +681,7 @@ class EdgeOverhangCondition(Condition):
         target_object: 目标物体（Phone）
         box_edge_dummy: 盒子边缘标记点 (box_edge) - 作为参考坐标系
         phone_edge_dummy: 手机边缘标记点 (phone_edge)
-        min_overhang: 最小悬空量（米），默认0.08
+        min_overhang: 最小悬空量（米），默认0.05
         velocity_threshold: 稳定性速度阈值，默认0.2
         required_stable_frames: 需要稳定的帧数，默认3
     """
@@ -686,7 +690,7 @@ class EdgeOverhangCondition(Condition):
                  target_object: Shape,
                  box_edge_dummy: Dummy,
                  phone_edge_dummy: Dummy,
-                 min_overhang: float = 0.08,
+                 min_overhang: float = 0.05,
                  velocity_threshold: float = 0.2,
                  required_stable_frames: int = 3):
         self.target_object = target_object
@@ -792,20 +796,19 @@ class StableGraspCondition(Condition):
 ```python
 class ClearPathCondition(Condition):
     """
-    清道条件：检查辅助臂是否已移开，不会阻碍抓取臂后续的抬起路径。
+    清道条件：检查辅助臂是否已移开，并与目标物体保持足够距离。
 
     成功条件：
     1. 辅助臂夹爪已松开物体
     2. 辅助臂夹爪tip与目标物体保持足够距离
-    3. 辅助臂tip与抓取臂后续所有路径点保持足够距离
 
-    坐标系：使用世界坐标系下的距离计算（辅助臂tip到目标物体中心/后续路径点）
+    坐标系：使用世界坐标系下的距离计算（辅助臂tip到目标物体中心）
 
     Args:
         aux_gripper: 辅助臂夹爪
         target_object: 目标物体
         aux_tip_dummy: 辅助臂tip的dummy
-        lift_waypoints: 抓取臂后续要经过的路径点dummy列表
+        lift_waypoints: 兼容旧调用保留，当前 online 评估不使用
         min_clearance: 最小安全距离，默认0.15米
     """
 
@@ -818,6 +821,7 @@ class ClearPathCondition(Condition):
         self.aux_gripper = aux_gripper
         self.target_object = target_object
         self.aux_tip_dummy = aux_tip_dummy
+        # 保留参数兼容旧调用；online 评估不再依赖预设 lift waypoint。
         self.lift_waypoints = lift_waypoints or []
         self.min_clearance = min_clearance
 
@@ -836,20 +840,13 @@ class ClearPathCondition(Condition):
         if distance_to_target < self.min_clearance:
             return False, False
 
-        # 检查与所有后续路径点的距离
-        for wp_dummy in self.lift_waypoints:
-            wp_pos = np.array(wp_dummy.get_position())
-            distance_to_wp = np.linalg.norm(aux_tip_pos - wp_pos)
-            if distance_to_wp < self.min_clearance:
-                return False, False
-
         return True, False
 
     def reset(self):
         pass
 ```
 
-当前任务中的 `min_clearance` 为任务特化参数：`bimanual_edge_phone=0.34`，`bimanual_pivot_phone=0.15`，`bimanual_pick_plate=0.18`，`bimanual_pick_fork=0.25`。
+当前四个任务的 `_setup_phased_evaluator()` 都传入 `min_clearance=0.2`。`ClearPathCondition` 不再检查 lift waypoint 距离，因为 online policy 不一定沿 scripted lift waypoint 运动，继续依赖 waypoint 会让 Phase 3 成功率偏离真实清道状态。
 
 #### 5.2.4 LiftedCondition - 抬起条件
 
@@ -876,6 +873,8 @@ class LiftedCondition(Condition):
     def reset(self):
         pass
 ```
+
+`LiftedCondition` 类本身保留默认值以兼容旧调用；实际 `_setup_phased_evaluator()` 中传入的 Phase 4 阈值见 5B.6：edge phone 为 `1.0`，pivot phone 为 `0.9`，plate 为 `0.85`，fork 为 `0.8`。
 
 ### 5.3 双臂角色选择器 (ArmRoleSelector)
 
@@ -1289,68 +1288,116 @@ ArmRoleSelector: Selecting left_grasper (lower cost)
 
 ### 5.4 分阶段成功评估器 (PhasedSuccessEvaluator)
 
-**关键设计**：每个阶段的条件列表**累积**包含之前阶段的条件。
+**当前关键设计**：四个阶段条件是单独条件 `con1-con4`，状态机负责显式表达维持条件、转换条件和回退逻辑。
+
+`current_phase` 的语义是“正在尝试的阶段”：
+
+| `current_phase` | 含义 |
+|-----------------|------|
+| 1 | 正在尝试 PreManipulation |
+| 2 | Phase 1 已完成，正在尝试 Grasp |
+| 3 | Phase 2 已完成，正在尝试 ClearPath |
+| 4 | Phase 3 已完成，正在尝试 Lift |
+| 5 | Phase 4 已完成，Complete |
+
+`max_current_phase_reached` 是 episode 级别的最远到达状态，只前进不回退。`phase_status[i] = (max_current_phase_reached > i)`，因此 `phase_status` 表示 episode 历史上是否曾经完成该阶段，而不是最后一帧的瞬时条件是否仍满足。
 
 ```python
+PHASE_NAMES = {
+    1: "PreManipulation",
+    2: "Grasp",
+    3: "ClearPath",
+    4: "Lift",
+    5: "Complete",
+}
+
 class PhasedSuccessEvaluator:
     """
-    分阶段成功条件评估器。
+    分阶段成功条件评估器，适配 online policy 中可能出现的回退行为。
 
     特点：
-    - 每个阶段的成功条件累积包含之前阶段的条件
-    - 一个阶段的圆满完成预示着下一阶段的开始
-    - 使用整数标签表示阶段 (1, 2, 3, 4)
-
-    用途：
-    - 数据收集时：标注每帧的phase_type
-    - 评估时：判断模型是否成功完成每个阶段
+    - current_phase 表示正在尝试的阶段；5 表示四阶段全部完成
+    - current_phase 在 1-4 内可回退，进入 5 后不再回退
+    - max_current_phase_reached 只前进，用于 episode 最终阶段成功率
+    - 每个仿真 step 中每个 condition 只采样一次
     """
 
-    def __init__(self, phase_conditions: Dict[int, List[Condition]]):
-        self.phase_conditions = phase_conditions
-        self.num_phases = len(phase_conditions)
+    def __init__(self, stage_conditions: Dict[int, Condition]):
+        self.stage_conditions = stage_conditions
+        self.num_phases = 4
         self.current_phase = 1
+        self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
+        self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
 
     def reset(self):
         """重置评估器状态"""
         self.current_phase = 1
+        self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
-        for conditions in self.phase_conditions.values():
-            for cond in conditions:
-                if hasattr(cond, 'reset'):
-                    cond.reset()
+        self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
+        for cond in self.stage_conditions.values():
+            if hasattr(cond, 'reset'):
+                cond.reset()
+
+    def _sample_conditions_once(self) -> Dict[int, bool]:
+        status = {}
+        for phase_id in range(1, self.num_phases + 1):
+            cond = self.stage_conditions.get(phase_id)
+            status[phase_id] = bool(cond.condition_met()[0]) if cond is not None else False
+        self._last_condition_status = status
+        return status
+
+    def _maintenance_met(self, phase: int, cond: Dict[int, bool]) -> bool:
+        if phase == 1:
+            return True
+        if phase == 2:
+            return cond[1]
+        if phase in (3, 4):
+            return cond[2]
+        return True
+
+    def _transition_met(self, phase: int, cond: Dict[int, bool]) -> bool:
+        if phase == 1:
+            return cond[1]
+        if phase == 2:
+            return cond[1] and cond[2]
+        if phase == 3:
+            return cond[2] and cond[3]
+        if phase == 4:
+            return cond[2] and cond[4]
+        return False
 
     def evaluate_current_phase(self) -> Tuple[bool, int]:
-        """评估当前阶段是否完成
+        """按在线状态机推进当前阶段。"""
+        old_phase = self.current_phase
 
-        修复：一次调用中评估所有可完成的阶段，避免因跳帧导致阶段漏记录
-        """
-        if self.current_phase > self.num_phases:
-            return True, self.num_phases
+        if self.current_phase >= 5:
+            return False, self.num_phases
 
-        any_completed = False
-        last_completed_phase = 0
+        cond = self._sample_conditions_once()
 
-        while self.current_phase <= self.num_phases:
-            conditions = self.phase_conditions.get(self.current_phase, [])
-            all_met = all(cond.condition_met()[0] for cond in conditions)
+        if not self._maintenance_met(self.current_phase, cond):
+            self.current_phase = 1
 
-            if all_met:
-                self._phase_completion_status[self.current_phase] = True
-                last_completed_phase = self.current_phase
-                self.current_phase += 1
-                any_completed = True
-            else:
-                break
+        while self.current_phase <= self.num_phases and self._transition_met(self.current_phase, cond):
+            self.current_phase += 1
 
-        if any_completed:
-            return True, last_completed_phase
-        return False, self.current_phase
+        self.max_current_phase_reached = max(
+            self.max_current_phase_reached, self.current_phase
+        )
+        for phase_id in range(1, self.num_phases + 1):
+            self._phase_completion_status[phase_id] = (
+                self.max_current_phase_reached > phase_id
+            )
+
+        changed = self.current_phase != old_phase
+        completed_phase = min(max(self.current_phase - 1, 0), self.num_phases)
+        return changed, completed_phase
 
     def get_current_phase(self) -> int:
         """获取当前阶段ID"""
-        return min(self.current_phase, self.num_phases)
+        return self.current_phase
 
     def is_phase_completed(self, phase_id: int) -> bool:
         """检查指定阶段是否已完成"""
@@ -1358,17 +1405,32 @@ class PhasedSuccessEvaluator:
 
     def is_task_successful(self) -> bool:
         """检查任务是否整体成功"""
-        return self.current_phase > self.num_phases
+        return self.current_phase >= 5
 
     def get_phase_progress(self) -> Dict:
         """获取阶段进度信息（用于评估时记录）"""
         return {
-            'current_phase': self.get_current_phase(),
+            'current_phase': self.current_phase,
+            'current_phase_name': PHASE_NAMES.get(self.current_phase, "Unknown"),
+            'max_current_phase_reached': self.max_current_phase_reached,
+            'max_completed_phase': max(self.max_current_phase_reached - 1, 0),
             'total_phases': self.num_phases,
             'completed': self.is_task_successful(),
-            'phase_status': self._phase_completion_status.copy()
+            'phase_status': self._phase_completion_status.copy(),
+            'condition_status': self._last_condition_status.copy(),
         }
 ```
+
+转换规则如下：
+
+| 当前阶段 | 维持条件 | 转换条件 | 成功后进入 |
+|----------|----------|----------|------------|
+| 1 PreManipulation | 无 | `con1` | 2 Grasp |
+| 2 Grasp | `con1` | `con1 and con2` | 3 ClearPath |
+| 3 ClearPath | `con2` | `con2 and con3` | 4 Lift |
+| 4 Lift | `con2` | `con2 and con4` | 5 Complete |
+
+如果当前处于 Phase 2 且 `con1` 失效，或处于 Phase 3/4 且 `con2` 失效，状态机先回到 1，再用本 step 的同一份 condition 快照从 1 重新推进。这样既避免 `stable_count` 在同一步内被重复累加，又能反映 online policy 中物体掉落、重新翘起、辅助臂反复靠近等情况。
 
 ### 5.5 任务类完整实现 (BimanualEdgePhone)
 
@@ -1441,7 +1503,7 @@ class BimanualEdgePhone(BimanualTask):
 
         # 注册最终成功条件
         self.register_success_conditions([
-            LiftedCondition(self.target_object, min_height=1.1)
+            LiftedCondition(self.target_object, min_height=1.0)
         ])
 
     def _get_active_waypoints(self) -> Dict[str, List[str]]:
@@ -1497,46 +1559,29 @@ class BimanualEdgePhone(BimanualTask):
         if Object.exists(lift_wp_name):
             lift_waypoints.append(Dummy(lift_wp_name))
 
-        # ====== 阶段条件定义 ======
-        # Phase 1: 悬空条件
-        phase1_conditions = [
-            EdgeOverhangCondition(
-                self.target_object, self.box_edge, self.phone_edge,
-                min_overhang=0.05, velocity_threshold=0.2, required_stable_frames=3
-            )
-        ]
-
-        # 共享的稳定抓取条件
-        stable_grasp_condition = StableGraspCondition(
+        # ====== 单独阶段条件定义 ======
+        con1 = EdgeOverhangCondition(
+            self.target_object, self.box_edge, self.phone_edge,
+            min_overhang=0.03, velocity_threshold=0.2, required_stable_frames=3
+        )
+        con2 = StableGraspCondition(
             grasper_gripper, self.target_object,
             velocity_threshold=0.1, required_stable_frames=3
         )
+        con3 = ClearPathCondition(
+            pusher_gripper, self.target_object, pusher_tip,
+            lift_waypoints=lift_waypoints, min_clearance=0.2
+        )
+        con4 = LiftedCondition(self.target_object, min_height=1.0)
 
-        # Phase 2: 稳定抓取
-        phase2_conditions = [stable_grasp_condition]
-
-        # Phase 3: 持续抓取 + 清道
-        phase3_conditions = [
-            stable_grasp_condition,
-            ClearPathCondition(
-                pusher_gripper, self.target_object, pusher_tip,
-                lift_waypoints=lift_waypoints, min_clearance=0.34
-            )
-        ]
-
-        # Phase 4: 抬起
-        phase4_conditions = [
-            LiftedCondition(self.target_object, min_height=1.1)
-        ]
-
-        phase_conditions = {
-            1: phase1_conditions,
-            2: phase2_conditions,
-            3: phase3_conditions,
-            4: phase4_conditions
+        stage_conditions = {
+            1: con1,
+            2: con2,
+            3: con3,
+            4: con4,
         }
 
-        self.phased_evaluator = PhasedSuccessEvaluator(phase_conditions)
+        self.phased_evaluator = PhasedSuccessEvaluator(stage_conditions)
         logging.info("PhasedSuccessEvaluator initialized successfully")
 
     def init_episode(self, index: int) -> List[str]:
@@ -1629,7 +1674,7 @@ class BimanualEdgePhone(BimanualTask):
         用于演示数据收集时标注每一帧。
 
         Returns:
-            (strategy_type, phase_type) 整数元组
+            (strategy_type, phase_type) 整数元组，phase_type 可能为 5=Complete
         """
         strategy_type = self.STRATEGY_TYPE
 
@@ -1644,8 +1689,11 @@ class BimanualEdgePhone(BimanualTask):
     def get_phase_progress(self) -> Dict:
         """获取阶段进度信息"""
         if self.phased_evaluator is None:
-            return {'current_phase': 1, 'total_phases': 4, 'completed': False,
-                    'phase_status': {1: False, 2: False, 3: False, 4: False}}
+            return {'current_phase': 1, 'current_phase_name': PHASE_NAMES[1],
+                    'max_current_phase_reached': 1, 'max_completed_phase': 0,
+                    'total_phases': 4, 'completed': False,
+                    'phase_status': {1: False, 2: False, 3: False, 4: False},
+                    'condition_status': {1: False, 2: False, 3: False, 4: False}}
         return self.phased_evaluator.get_phase_progress()
 
     def get_role_assignment(self) -> Dict[str, str]:
@@ -1779,7 +1827,7 @@ execute_waypoints_bimanual_phased() [由scene.py调用]
 |------|---------|------|
 | `GraspPointHeightCondition` | ✅ 三任务共用 | Phase 1 翘起检测（调整阈值） |
 | `StableGraspCondition` | ✅ 完全复用 | Phase 2 抓取条件 |
-| `ClearPathCondition` | ✅ 同构实现（阈值按任务调整） | Phase 3 清道条件 |
+| `ClearPathCondition` | ✅ 同构实现（当前四任务均为 `min_clearance=0.2`） | Phase 3 清道条件 |
 | `LiftedCondition` | ✅ 复用（调整阈值） | Phase 4 拿起条件 |
 | `ArmRoleSelector` | ✅ 完全复用 | scheme-based 方案选择器 |
 | `PhasedSuccessEvaluator` | ✅ 完全复用 | 分阶段评估框架 |
@@ -2152,7 +2200,7 @@ class BimanualPivotPhone(BimanualTask):
 |------|-----|------|
 | STRATEGY_TYPE | 3 | PressTilt策略 |
 | grasp_pt 高度阈值 | 0.80 m | Phase 1 成功条件 |
-| LiftedCondition min_height | 0.90 m | Phase 4 成功条件 |
+| LiftedCondition min_height | 0.85 m | Phase 4 成功条件 |
 | 目标物体 | `plate` | Shape 名称 |
 | contact 关键点 | `press_pt` | 按压接触点 |
 | affordance 关键点 | 无 | 此任务无环境约束点 |
@@ -2268,7 +2316,7 @@ class BimanualPickPlate(BimanualTask):
         self.phased_evaluator = None
 
         self.register_success_conditions([
-            LiftedCondition(self.target_object, min_height=0.9)
+            LiftedCondition(self.target_object, min_height=0.85)
         ])
 
     def _get_active_waypoints(self) -> Dict[str, List[str]]:
@@ -2355,8 +2403,8 @@ class BimanualPickPlate(BimanualTask):
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | STRATEGY_TYPE | 3 | PressTilt策略 |
-| grasp_pt 高度阈值 | 0.77 m | Phase 1 成功条件（叉子较小，阈值略低） |
-| LiftedCondition min_height | 0.88 m | Phase 4 成功条件 |
+| grasp_pt 高度阈值 | 0.70 m | Phase 1 成功条件（叉子较小，阈值略低） |
+| LiftedCondition min_height | 0.80 m | Phase 4 成功条件 |
 | 目标物体 | `Fork_phy` | Shape 名称 |
 | contact 关键点 | `press_pt` | 按压接触点（叉子头部） |
 | affordance 关键点 | 无 | 此任务无环境约束点 |
@@ -2472,7 +2520,7 @@ class BimanualPickFork(BimanualTask):
         self.phased_evaluator = None
 
         self.register_success_conditions([
-            LiftedCondition(self.target_object, min_height=0.88)
+            LiftedCondition(self.target_object, min_height=0.8)
         ])
 
     def _get_active_waypoints(self) -> Dict[str, List[str]]:
@@ -2556,10 +2604,12 @@ class BimanualPickFork(BimanualTask):
 
 | 任务 | STRATEGY_TYPE | Phase 1 阈值 | Phase 4 阈值 | 目标物体 | 原始WPs | 镜像WPs | has_affordance |
 |------|--------------|-------------|-------------|---------|--------|---------|----------------|
-| bimanual_edge_phone | 1 (EdgeHang) | overhang≥0.05m | z≥1.1m | Phone | 0-7 | 0_a-7_a | ✅ box_edge |
+| bimanual_edge_phone | 1 (EdgeHang) | overhang>0.03m | z≥1.0m | Phone | 0-7 | 0_a-7_a | ✅ box_edge |
 | bimanual_pivot_phone | 2 (WallLever) | grasp_pt.z≥0.80m | z≥0.9m | Phone | 0-8 | 0_a-8_a | ✅ wall_pivot |
-| bimanual_pick_plate | 3 (PressTilt) | grasp_pt.z≥0.80m | z≥0.9m | plate | 0-7 | 0_a-7_a | ❌ |
-| bimanual_pick_fork | 3 (PressTilt) | grasp_pt.z≥0.75m | z≥0.88m | Fork_phy | 0-7 | 0_a-7_a | ❌ |
+| bimanual_pick_plate | 3 (PressTilt) | grasp_pt.z≥0.80m | z≥0.85m | plate | 0-7 | 0_a-7_a | ❌ |
+| bimanual_pick_fork | 3 (PressTilt) | grasp_pt.z≥0.70m | z≥0.80m | Fork_phy | 0-7 | 0_a-7_a | ❌ |
+
+四个任务的 Phase 3 清道阈值当前均为 `min_clearance=0.2`，并且只检查辅助臂夹爪是否松开、辅助臂 tip 与目标物体是否保持距离；`lift_waypoints` 参数仅为兼容旧调用保留。
 
 ### 5B.7 Scheme-Based 设计统一接口
 
@@ -2687,14 +2737,16 @@ def _get_active_waypoints(self) -> Dict[str, List[str]]:
 
 ## 6. 训练数据加载 (launch_utils.py)
 
-**注意**：训练数据加载的修改是**模型特定**的，已迁移到对应的模型设计文档中。
+**注意**：训练数据加载的修改是**模型特定**的，当前以各模型 `launch_utils.py` 实现为准。
 
 ### 6.1 数据加载修改位置
 
 | 模型 | 加载的数据 | 详细文档 |
 |------|-----------|---------|
-| **ACT_BC_ENC_STRATEGY** | `strategy_type`, `phase_type` | [STRATEGY_MODEL_DESIGN.md 第4节](../06_misc/act_family/STRATEGY_MODEL_DESIGN.md#4-数据加载扩展-launch_utilspy) |
-| **ACT_BC_ENC_KEYPOINT** | 关键点位姿 (`contact_*`, `grasp_*`, `affordance_*`), 2D投影 | [KEYPOINT_POSE_INJECTION_PLAN.md 第4节](../06_misc/act_family/KEYPOINT_POSE_INJECTION_PLAN.md#4-数据加载扩展-launch_utilspy) |
+| **ACT_BC_ENC_STRATEGY** | `strategy_type`, `phase_type` | `occ_grasp_models/agents/act_bc_enc_strategy/launch_utils.py` |
+| **ACT_BC_KEYPOINT_STRATEGY** | 关键点位姿、2D投影、`strategy_type`, `phase_type` | `occ_grasp_models/agents/act_bc_keypoint_strategy/launch_utils.py` |
+| **ACT_BC_ENC_KEYPOINT_STRATEGY** | 关键点位姿、2D投影、`strategy_type`, `phase_type` | `occ_grasp_models/agents/act_bc_enc_keypoint_strategy/launch_utils.py` |
+| **ACT_BC_ENC_KEYPOINT / ACT_BC_KEYPOINT** | 关键点位姿 (`contact_*`, `grasp_*`, `affordance_*`), 2D投影 | 各自 `launch_utils.py` |
 
 ### 6.2 数据来源统一说明
 
@@ -2713,6 +2765,15 @@ contact_position = misc.get('contact_position', np.zeros(3))
 grasp_position = misc.get('grasp_position', np.zeros(3))
 # ... 更多字段见各模型文档
 ```
+
+当前策略/阶段加载器会把 1-based 标签转为 0-based：
+
+```python
+strategy_type = np.int32(misc.get('strategy_type', 1) - 1)
+phase_type = np.int32(misc.get('phase_type', 1) - 1)
+```
+
+随后会按 `STRATEGY_TYPES` / `PHASE_TYPES` 或 `num_phases=4` clamp 到有效范围。因此 raw `phase_type=5` 在四阶段分类头中会作为 `Lift` 处理；如果需要训练五分类阶段头，必须同步修改 `num_phases`、`PHASE_TYPES` 和模型输出维度。
 
 ### 6.3 数据流图
 
@@ -2797,12 +2858,13 @@ def verify_demo_labels(episode_path: str):
 Phase 1 (PreManip)  → Phase 2 (Grasp)    : EdgeOverhangCondition 满足
 Phase 2 (Grasp)     → Phase 3 (ClearPath): StableGraspCondition 满足
 Phase 3 (ClearPath) → Phase 4 (Lift)     : ClearPathCondition 满足
-任务完成                                  : LiftedCondition 满足
+Phase 4 (Lift)      → Phase 5 (Complete) : LiftedCondition 满足
 ════════════════════════════════════════════════════════
 
 验证要点:
 - strategy_type 应始终为 1
-- phase_type 应随任务执行从 1→2→3→4 递增
+- scripted demo 中 phase_type 通常从 1→2→3→4→5 前进
+- online eval 中 current_phase 可回退，但 max_current_phase_reached 和 phase_status 只前进
 - 阶段转换应发生在正确的物理状态变化时
 ```
 
@@ -2824,16 +2886,16 @@ Phase 3 (ClearPath) → Phase 4 (Lift)     : ClearPathCondition 满足
 | 检查项 | 说明 | 当前状态 |
 |--------|------|----------|
 | `STRATEGY_NAMES` 字典 | 脚本开头定义，整数→名称映射 | ✅ 已实现（第29-33行） |
-| `PHASE_NAMES` 字典 | 脚本开头定义，整数→名称映射 | ✅ 已实现（第36-41行） |
-| `STRATEGY_TYPE = 1` | 类属性，整数值 | ✅ 已实现（第523行） |
-| `EdgeOverhangCondition` | **使用相对坐标系** | ✅ 已实现（第48行） |
-| `StableGraspCondition` | 稳定抓取检测 | ✅ 已实现（第109行） |
-| `ClearPathCondition` | 清道检测 | ✅ 已实现（第159行） |
-| `LiftedCondition` | 抬起检测 | ✅ 已有（第209行） |
-| `ArmRoleSelector` | 双臂角色选择 | ✅ 已实现（第230行） |
-| `PhasedSuccessEvaluator` | 分阶段评估器 | ✅ 已实现（第445行） |
-| `evaluate_phase_and_get_labels()` | 返回 `(strategy_type, phase_type)` | ✅ 已实现（第710行） |
-| `box_edge`, `phone_edge` Dummy | 在 `init_task()` 中获取 | ✅ 已实现（第531-536行） |
+| `PHASE_NAMES` 字典 | 脚本开头定义，含 `5=Complete` | ✅ 已实现（第36-42行） |
+| `STRATEGY_TYPE = 1` | 类属性，整数值 | ✅ 已实现（第633行） |
+| `EdgeOverhangCondition` | **使用相对坐标系** | ✅ 已实现（第49行） |
+| `StableGraspCondition` | 稳定抓取检测 | ✅ 已实现（第110行） |
+| `ClearPathCondition` | 清道检测，不再依赖 waypoint 距离 | ✅ 已实现（第160行） |
+| `LiftedCondition` | 抬起检测 | ✅ 已有（第202行） |
+| `ArmRoleSelector` | 双臂角色选择 | ✅ 已实现（第223行） |
+| `PhasedSuccessEvaluator` | 在线可回退状态机 | ✅ 已实现（第505行） |
+| `evaluate_phase_and_get_labels()` | 返回 `(strategy_type, phase_type)`，phase 可为 5 | ✅ 已实现（第890行） |
+| `box_edge`, `phone_edge` Dummy | 在 `init_task()` 中获取 | ✅ 已实现（第641-646行） |
 
 #### 7.4.2 Scene.py 修改清单
 
@@ -2841,8 +2903,8 @@ Phase 3 (ClearPath) → Phase 4 (Lift)     : ClearPathCondition 满足
 |--------|------|--------|----------|
 | `_current_strategy_type` | `__init__` 中初始化为 None | 4.1节 | ✅ 已实现（第110行） |
 | `_current_phase_type` | `__init__` 中初始化为 None | 4.1节 | ✅ 已实现（第111行） |
-| `_project_3d_to_2d()` | 3D到2D投影函数 | 4.2节 | ✅ 已实现（第887行） |
-| `_get_misc()` 扩展 | 添加策略/阶段/关键点/2D投影 | 4.3节 | ✅ 已实现（第970行附近） |
+| `_project_3d_to_2d()` | 3D到2D投影函数 | 4.2节 | ✅ 已实现（第895行） |
+| `_get_misc()` 扩展 | 添加策略/阶段/关键点/2D投影 | 4.3节 | ✅ 已实现（第950行附近） |
 | `execute_waypoints_bimanual_phased()` | 每帧更新标签 | 4.4节 | ✅ 已实现（第583行） |
 
 #### 7.4.3 TTT场景文件清单
@@ -2874,7 +2936,7 @@ Phase 3 (ClearPath) → Phase 4 (Lift)     : ClearPathCondition 满足
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ 1. 任务定义 (bimanual_edge_phone.py)                                      │
 │    ├── STRATEGY_TYPE = 1                                                  │
-│    ├── PhasedSuccessEvaluator(phase_conditions={1:..., 2:..., 3:..., 4:})│
+│    ├── PhasedSuccessEvaluator(stage_conditions={1: con1, ..., 4: con4})   │
 │    └── evaluate_phase_and_get_labels() → (strategy_type, phase_type)     │
 └──────────────────────────────────────────────────────────────────────────┘
                                     ↓
@@ -2911,436 +2973,247 @@ dataset_generator_bimanual.py
 
 ---
 
-## 8. 评估时的阶段判断
+## 8. 在线评估与环境真实状态可视化
 
-### 8.1 概述与修改目标
+### 8.1 当前实现概述
 
-评估训练好的模型时，除了判断任务是否最终成功，还需要评估：
-1. 模型是否成功完成了每个阶段
-2. 在哪个阶段失败了
-3. 各阶段的成功率统计
+当前 PPI / ACT / OpenPI 在线评估已经不再由 runner 每帧主动推进阶段评估器，而是由 RLBench 环境的 step callback 在每个物理仿真 step 推进真实阶段状态。runner 只读取状态用于统计，视频 recorder 只读取状态用于可视化。
 
-**核心思想**：复用任务类（如`BimanualEdgePhone`）中定义的 `PhasedSuccessEvaluator`，在评估时每帧调用阶段判断逻辑。
+核心链路如下：
 
-### 8.2 修改脚本概览与交织关系
+```
+scene.step()
+  -> CustomRLBenchEnv._my_callback()
+     -> task.phased_evaluator.evaluate_current_phase()
+        -> 采样 con1/con2/con3/con4 一次
+        -> 按在线状态机更新 current_phase / max_current_phase_reached
+        -> 更新 phase_status / condition_status
 
-#### 8.2.1 与前七部分的交织关系
+runner episode end
+  -> env.get_phase_progress()
+  -> phase_success_counts
+  -> eval_envs/phase_i_success_rate / eval_envs/avg_max_phase
 
-| 修改位置 | 前1-7部分（数据收集） | 第8部分（评估） | 交织程度 |
-|---------|---------------------|----------------|---------|
-| `bimanual_edge_phone.py` | 定义阶段条件类和`PhasedSuccessEvaluator` | 评估时复用这些类 | **完全交织** |
-| `scene.py` | 在`execute_waypoints_bimanual_phased()`中调用标签接口 | 不修改 | 无 |
-| `_independent_env_runner.py` | 不修改 | 添加阶段评估统计 | **第8部分独立** |
-| `custom_rlbench_env.py` | 不修改 | 添加阶段评估接口 | **第8部分独立** |
-| `eval.py` | 不修改 | 配置和结果收集 | **第8部分独立** |
-
-**结论**：第8部分的修改需要**依赖前5部分在任务类中定义的阶段条件和评估器**，但评估框架的修改是独立的新增代码。
-
-#### 8.2.2 需要修改的脚本清单
-
-| 脚本 | 相对路径 | 修改类型 | 修改内容 |
-|------|---------|---------|---------|
-| 任务类 | `repos/RLBench/rlbench/bimanual_tasks/bimanual_edge_phone.py` | 与前5部分交织 | 确保`PhasedSuccessEvaluator`和阶段条件已实现（前5部分） |
-| 评估执行器 | `repos/YARR/yarr/runners/_independent_env_runner.py` | **第8部分新增** | 添加阶段级别评估统计 |
-| 环境封装 | `occ_grasp_models/helpers/custom_rlbench_env.py` | **第8部分新增** | 添加获取阶段状态的接口 |
-| 评估入口 | `occ_grasp_models/eval.py` | **第8部分新增** | 传递阶段评估配置 |
-
----
-
-### 8.3 具体修改方案
-
-#### 8.3.1 任务类依赖（前5部分实现，评估时复用）
-
-**文件**：`/home/hdliu/occ_grasp_fall/repos/RLBench/rlbench/bimanual_tasks/bimanual_edge_phone.py`
-
-确保以下内容已在前5部分实现（评估时复用）：
-
-```python
-# 第63行之后添加（如尚未添加）
-# ===========================================================
-# 以下代码在前5部分已定义，评估时直接复用
-# ===========================================================
-
-class BimanualEdgePhone(BimanualTask):
-    STRATEGY_TYPE = 1  # EdgeHang策略
-
-    # ... init_task 中需添加 ...
-    def init_task(self) -> None:
-        # ... 现有代码 ...
-        self.target_object = Shape('Phone')
-        self.box_edge = Dummy('box_edge')      # 需添加
-        self.phone_edge = Dummy('phone_edge')  # 需添加
-        # ... 其他代码 ...
-
-    # 关键接口：评估时调用此方法获取阶段状态
-    def evaluate_phase_and_get_labels(self) -> Tuple[int, int]:
-        """返回 (strategy_type, phase_type)"""
-        strategy_type = self.STRATEGY_TYPE
-        if self.phased_evaluator is None:
-            phase_type = 1
-        else:
-            self.phased_evaluator.evaluate_current_phase()
-            phase_type = self.phased_evaluator.get_current_phase()
-        return strategy_type, phase_type
-
-    def get_phase_progress(self) -> Dict:
-        """获取阶段进度信息（评估时调用）"""
-        if self.phased_evaluator is None:
-            return {'current_phase': 1, 'total_phases': 4, 'completed': False,
-                    'phase_status': {1: False, 2: False, 3: False, 4: False}}
-        return self.phased_evaluator.get_phase_progress()
+cinematic recorder frame
+  -> TaskRecorder.take_snap(obs)
+  -> env.get_env_overlay_state()
+  -> task.STRATEGY_TYPE + task.get_phase_progress() + Dummy 3D points
+  -> 投影到 cinematic camera 并绘制 marker
 ```
 
-#### 8.3.2 custom_rlbench_env.py 修改
+该链路属于环境真实状态的后验分析 / 可视化，不给 policy 动作生成提供额外输入。
 
-**文件**：`/home/hdliu/occ_grasp_fall/occ_grasp_models/helpers/custom_rlbench_env.py`
+### 8.2 任务侧阶段状态机
 
-**前置修改**：在文件开头添加必要的导入
+四个任务都使用同一语义的 `PhasedSuccessEvaluator(stage_conditions)`：
+
+| 文件 | Phase 1 条件 | Phase 2 条件 | Phase 3 条件 | Phase 4 条件 |
+|------|-------------|-------------|-------------|-------------|
+| `bimanual_edge_phone.py` | `EdgeOverhangCondition` | `StableGraspCondition` | `ClearPathCondition` | `LiftedCondition` |
+| `bimanual_pivot_phone.py` | `GraspPointHeightCondition` | `StableGraspCondition` | `ClearPathCondition` | `LiftedCondition` |
+| `bimanual_pick_plate.py` | `GraspPointHeightCondition` | `StableGraspCondition` | `ClearPathCondition` | `LiftedCondition` |
+| `bimanual_pick_fork.py` | `GraspPointHeightCondition` | `StableGraspCondition` | `ClearPathCondition` | `LiftedCondition` |
+
+`get_phase_progress()` 当前返回：
 
 ```python
-# 在现有的 from typing import Type, List 行修改为：
-from typing import Type, List, Dict, Tuple
+{
+    'current_phase': 1..5,
+    'current_phase_name': 'PreManipulation' | 'Grasp' | 'ClearPath' | 'Lift' | 'Complete',
+    'max_current_phase_reached': 1..5,
+    'max_completed_phase': 0..4,
+    'total_phases': 4,
+    'completed': bool,
+    'phase_status': {1: bool, 2: bool, 3: bool, 4: bool},
+    'condition_status': {1: bool, 2: bool, 3: bool, 4: bool},
+}
 ```
 
-**修改位置**：在 `CustomRLBenchEnv` 类中添加获取阶段状态的方法
+其中 `phase_status` 来自 `max_current_phase_reached`，表示 episode 内是否曾经完成该阶段。它不是当前帧 `condition_status` 的别名，也不会因为后续物体掉落而回退。
+
+### 8.3 环境封装中的调用点
+
+`CustomRLBenchEnv` 和 `CustomMultiTaskRLBenchEnv` 都实现了同样的阶段接口：
+
+| 接口 | 作用 |
+|------|------|
+| `_update_phase_evaluation()` | 调用当前 task 的 `phased_evaluator.evaluate_current_phase()` |
+| `_my_callback()` | 每个 `scene.step()` 后先推进真实阶段状态，再处理内部录制帧 |
+| `get_phase_progress()` | 只读取 task 当前阶段进度，不推进 evaluator |
+| `evaluate_current_phase()` | 兼容旧接口，内部调用 `_update_phase_evaluation()` |
+| `get_strategy_and_phase()` | 兼容读取 `(strategy_type, phase_type)` |
+| `get_env_overlay_state()` | 给 cinematic recorder 返回环境真实策略、阶段和 3D 点 |
+
+关键点是：在线评估阶段成功率不依赖是否保存视频。`_my_callback()` 总是在环境 step callback 中注册，`cinematic_recorder.enabled` 只影响额外视频帧是否保存。
+
+### 8.4 Runner 统计逻辑
+
+`repos/YARR/yarr/runners/_independent_env_runner.py` 当前只读取阶段进度：
 
 ```python
-# 在 CustomRLBenchEnv 类中添加（约在 step 方法之后）
-
-def get_phase_progress(self) -> Dict:
-    """
-    获取当前任务的阶段进度信息
-
-    Returns:
-        Dict: 包含阶段完成状态的字典，若任务不支持阶段评估则返回None
-
-    注意：self._task 是 TaskEnvironment 实例，self._task._task 是实际的任务类实例
-    """
-    if self._task is None or self._task._task is None:
-        return None
-
-    task = self._task._task
-    if hasattr(task, 'get_phase_progress'):
-        return task.get_phase_progress()
-    return None
-
-def evaluate_current_phase(self) -> Tuple[bool, int]:
-    """
-    评估当前阶段是否完成
-
-    Returns:
-        (phase_completed, completed_phase): 阶段是否刚完成及刚完成的阶段ID
-
-    注意：当 phase_completed=True 时，返回的第二个值是刚完成的阶段编号，不需要再 -1
-    """
-    if self._task is None or self._task._task is None:
-        return False, 1
-
-    task = self._task._task
-    if hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
-        return task.phased_evaluator.evaluate_current_phase()
-    return False, 1
-
-def get_strategy_and_phase(self) -> Tuple[int, int]:
-    """
-    获取当前策略类型和阶段类型
-
-    Returns:
-        (strategy_type, phase_type)
-    """
-    if self._task is None or self._task._task is None:
-        return 1, 1
-
-    task = self._task._task
-    if hasattr(task, 'evaluate_phase_and_get_labels'):
-        return task.evaluate_phase_and_get_labels()
-
-    # 默认值
-    strategy = getattr(task, 'STRATEGY_TYPE', 1)
-    return strategy, 1
-```
-
-#### 8.3.3 _independent_env_runner.py 修改
-
-**文件**：`/home/hdliu/occ_grasp_fall/repos/YARR/yarr/runners/_independent_env_runner.py`
-
-**修改位置1**：`_run_eval_independent` 方法开头，初始化 rollout 完成/失败计数和阶段统计
-
-```python
-# success_count 表示 rollout 正常完成并写入统计的 episode 数，不等价于 reward 成功数
-success_count = 0
-failed_count = 0
-failed_episodes = []
-
-# ===== 新增：阶段级别评估统计 =====
-phase_success_counts = {1: 0, 2: 0, 3: 0, 4: 0}  # 各阶段成功次数
-max_phases_reached = []  # 每个episode达到的最大阶段
-phase_completion_frames = {1: [], 2: [], 3: [], 4: []}  # 各阶段完成帧数
-# =================================
-```
-
-**修改位置2**：episode 循环内（约第217-240行），在每帧评估阶段状态
-
-```python
-# 在 for replay_transition in generator: 循环内
-# 在 episode_rollout.append(replay_transition) 之后添加（约第238行后）
-
-# ===== 新增：每帧评估阶段状态 =====
-if hasattr(env, 'evaluate_current_phase'):
-    phase_completed, completed_phase = env.evaluate_current_phase()
-    # 记录阶段完成事件（注意：返回值已经是 completed_phase，不需要 -1）
-    if phase_completed:
-        # 检查该阶段是否已记录过（避免重复记录）
-        already_recorded = completed_phase in [r.info.get('phase_completed') for r in episode_rollout]
-        if not already_recorded:
-            # 标记该阶段刚完成
-            replay_transition.info['phase_completed'] = completed_phase
-            replay_transition.info['completion_frame'] = len(episode_rollout)
-# ============================================
-```
-
-**修改位置3**：episode 结束后（约第254-291行），统计阶段结果
-
-```python
-# 在 reward = episode_rollout[-1].reward 之后（约第255行后）
-# 添加阶段评估统计
-
-# ===== 新增：统计该episode的阶段完成情况 =====
 if hasattr(env, 'get_phase_progress'):
     phase_progress = env.get_phase_progress()
     if phase_progress is not None:
-        phase_status = phase_progress.get('phase_status', {})
-        current_max_phase = 0
-        for phase_id in range(1, 5):
-            if phase_status.get(phase_id, False):
-                phase_success_counts[phase_id] += 1
-                current_max_phase = phase_id
-        max_phases_reached.append(current_max_phase)
-
-        logging.info(f"Phase progress: {phase_status}, Max phase: {current_max_phase}")
-# ===========================================
+        replay_transition.info['phase_progress'] = phase_progress
 ```
 
-**修改位置3.5**：episode rollout 正常完成后，`success_count` 按“无异常完成”计数；reward 成功另用于 scheme 分层统计
+episode 正常完成后按 `phase_status` 汇总：
 
 ```python
-# Episode completed successfully
-success_count += 1
-
-# reward > 0.99 才作为任务成功写入 scheme_stats
-if reward > 0.99:
-    scheme_stats[current_gt_scheme]['success'] += 1
-    episode_steps = len(episode_rollout)
-    scheme_stats[current_gt_scheme]['success_steps'].append(episode_steps)
-else:
-    logging.info(f"Episode {eval_demo_seed} FAILED with scheme '{current_gt_scheme}'")
+phase_status = phase_progress.get('phase_status', {})
+for phase_id in range(1, 5):
+    if phase_status.get(phase_id, False):
+        phase_success_counts[phase_id] += 1
+max_phases_reached.append(phase_progress.get('max_completed_phase', 0))
 ```
 
-**修改位置4**：在 summaries 添加部分（约第349行附近），添加阶段评估指标
+输出指标仍是：
+
+| 指标 | 说明 |
+|------|------|
+| `eval_envs/phase_1_success_rate` | episode 内曾经完成 Phase 1 的比例 |
+| `eval_envs/phase_2_success_rate` | episode 内曾经完成 Phase 2 的比例 |
+| `eval_envs/phase_3_success_rate` | episode 内曾经完成 Phase 3 的比例 |
+| `eval_envs/phase_4_success_rate` | episode 内曾经进入 `5=Complete` 的比例 |
+| `eval_envs/avg_max_phase` | `max_completed_phase` 的 episode 平均值，范围 0-4 |
+| `eval_envs/success_count` | rollout 正常完成并写入统计的 episode 数，不等价于 reward 成功数 |
+| `eval_envs/failed_count` | 异常、中断或 StopIteration episode 数 |
+| scheme 分层 success rate | `reward > 0.99` 的任务成功率，按 `left_grasper/right_grasper/unknown` 汇总 |
+
+不要在 runner 循环中重新调用 `env.evaluate_current_phase()`。条件类内部有 `stable_count`，重复推进会人为加速稳定条件，导致阶段指标偏高。
+
+### 8.5 环境真实状态视频 Overlay
+
+`repos/YARR/yarr/utils/video_utils.py` 的 `TaskRecorder._apply_overlay()` 当前只支持 `overlay_source: "env"`。它不读取模型 `pred_info`，也不读取 `obs.misc["phase_type"]`。
+
+`get_env_overlay_state()` 返回的数据结构：
 
 ```python
-# rollout 完成/失败计数
-summaries.append(ScalarSummary('eval_envs/success_count', success_count))
-summaries.append(ScalarSummary('eval_envs/failed_count', failed_count))
-
-# ===== 新增：阶段级别评估指标 =====
-total_episodes = success_count + failed_count
-if total_episodes > 0:
-    # success_rate 是 rollout 无异常完成率，不是 reward 任务成功率
-    success_rate = success_count / total_episodes
-    summaries.append(ScalarSummary('eval_envs/success_rate', success_rate))
-
-    for phase_id in range(1, 5):
-        phase_rate = phase_success_counts[phase_id] / total_episodes
-        summaries.append(ScalarSummary(f'eval_envs/phase_{phase_id}_success_rate', phase_rate))
-
-    if len(max_phases_reached) > 0:
-        avg_max_phase = sum(max_phases_reached) / len(max_phases_reached)
-        summaries.append(ScalarSummary('eval_envs/avg_max_phase', avg_max_phase))
-# ==================================
+{
+    'strategy_type': strategy_type,
+    'strategy_name': 'EdgeHang' | 'WallLever' | 'PressTilt',
+    'phase_progress': task.get_phase_progress(),
+    'points_3d': {
+        'contact': push_pt or press_pt,
+        'grasp': grasp_pt,
+        'affordance': box_edge or wall_pivot,
+        'left_tip': Panda_leftArm_tip,
+        'right_tip': Panda_rightArm_tip,
+    },
+}
 ```
 
-#### 8.3.4 eval.py 修改（可选）
+视频左上角显示：
 
-**文件**：`/home/hdliu/occ_grasp_fall/occ_grasp_models/eval.py`
-
-**修改位置**：main 函数中，添加阶段评估配置（约第196行后）
-
-```python
-# 在 @hydra.main 装饰的 main 函数中，eval_cfg 处理之后
-
-# ===== 新增：阶段评估配置（可选）=====
-# 可在 conf/eval.yaml 中添加：
-# phase_evaluation:
-#   enabled: true
-#   log_per_episode: true
-# 这里只是传递配置，实际逻辑在 _independent_env_runner.py 中
-# =====================================
+```text
+PressTilt | 3 ClearPath
 ```
+
+marker 来源和颜色：
+
+| 名称 | Dummy 候选 | 默认显示 |
+|------|------------|----------|
+| `contact` | `push_pt` / `press_pt` | 红色 marker + `contact` |
+| `grasp` | `grasp_pt` | 绿色 marker + `grasp` |
+| `affordance` | `box_edge` / `wall_pivot` | 蓝色 marker + `afford` |
+| `left_tip` | `Panda_leftArm_tip` | 黄色 marker + `left` |
+| `right_tip` | `Panda_rightArm_tip` | 紫色 marker + `right` |
+
+三类评估配置都已使用统一字段：
+
+```yaml
+cinematic_recorder:
+    overlay_enabled: True
+    overlay_source: "env"
+    overlay_draw_keypoints: True
+    overlay_draw_grippers: True
+    overlay_draw_xyz_table: False
+```
+
+对应文件：
+
+| 入口 | 配置文件 |
+|------|----------|
+| PPI online eval | `occ_grasp_models/conf/eval_ppi.yaml` |
+| 常规 eval | `occ_grasp_models/conf/eval.yaml` |
+| OpenPI eval | `occ_grasp_models/conf/eval_openpi.yaml` |
+
+### 8.6 PPI Smoke Test
+
+相关 conda 环境是 `ppi`。如果 `eval_ppi.yaml` 已配置好当前要评估的权重路径，可以先做 1 个 episode 的在线检查：
+
+```bash
+conda activate ppi
+cd /home/hdliu/occ_grasp_fall/occ_grasp_models
+python eval_ppi.py \
+  framework.eval_episodes=1 \
+  framework.eval_processes=1 \
+  framework.eval_envs=1 \
+  cinematic_recorder.enabled=True \
+  cinematic_recorder.max_success_videos=1 \
+  cinematic_recorder.max_fail_videos=1 \
+  hydra.job.chdir=false
+```
+
+更稳妥的做法是以现有脚本为准，复制其中完整的 `python eval_ppi.py ...` 命令，把 `framework.eval_episodes=30` 临时改成 `framework.eval_episodes=1`，并保留权重、数据路径和任务列表等覆盖项。完整评估入口仍是：
+
+```bash
+conda activate ppi
+cd /home/hdliu/occ_grasp_fall/occ_grasp_models
+bash scripts/ppi/inference/evaluate_ppi_four_tasks.sh
+```
+
+检查项：
+
+- 日志里 `Phase progress` 包含 `phase_status`、`Max completed phase`、`Max current phase reached`。
+- `eval_data.csv` 写出 `phase_1_success_rate` 到 `phase_4_success_rate` 和 `avg_max_phase`。
+- 保存的视频左上角显示策略名与阶段名。
+- contact / grasp / affordance / left_tip / right_tip marker 随环境真实物体和夹爪运动。
+- Phase 3 指标不能与旧 waypoint 依赖版本直接横向比较，因为现在只检查辅助臂是否松开并远离目标物体。
+
+### 8.7 与模型输入的边界
+
+PPI、ACT_BC_VISION、BIMANUAL_PERACT、OPENPI_POLICY 的动作生成仍走原有链路：
+
+```text
+RolloutGenerator.generator()
+  -> agent.act(...)
+  -> env.step(act_result)
+```
+
+本节新增或更新的逻辑不修改：
+
+- agent 输入 observation 协议
+- checkpoint 加载
+- 动作执行逻辑
+- `occ_grasp_models/agents/ppi`
+- `occ_grasp_models/agents/act_bc_vision`
+- `occ_grasp_models/agents/bimanual_peract`
+- `occ_grasp_models/agents/openpi_policy`
+
+环境真实阶段用于统计与视频，不用于指导 policy。带 `StrategyPhasePredictor` 的模型在推理时仍由模型自己预测 strategy / phase；评估层面的 `PhasedSuccessEvaluator` 只是客观度量。
+
+### 8.8 注意事项
+
+1. 四个任务中 `PhasedSuccessEvaluator` 和条件类仍是重复实现，修改其中一个任务时要同步检查另外三个任务。
+2. `phase_type=5` 会出现在 raw `obs.misc` 或 overlay 中；当前四阶段训练加载会 clamp 到 Lift。如果要显式监督 Complete，需要同步扩展模型配置。
+3. 进入 `current_phase=5` 后 evaluator 不再采样条件，也不再回退；这是 episode 成功的终止状态。
+4. `condition_status` 是当前最近一次 condition 快照，适合 debug；阶段成功率应该看 `phase_status`。
+5. `ClearPathCondition` 的 `lift_waypoints` 参数保留但不参与判断，Phase 3 语义已从“避开 scripted lift waypoint”改为“辅助臂已松开且远离目标物体”。
 
 ---
 
-### 8.4 完整数据流（含评估）
+**文档版本**: 1.9
+**最后更新**: 2026-05-14
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ 1. 任务定义 (bimanual_edge_phone.py) - 前5部分实现                         │
-│    ├── STRATEGY_TYPE = 1                                                  │
-│    ├── PhasedSuccessEvaluator(phase_conditions={1:..., 2:..., 3:..., 4:})│
-│    ├── evaluate_phase_and_get_labels() → (strategy_type, phase_type)     │
-│    └── get_phase_progress() → Dict                                       │
-└──────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-        ┌───────────────────────────┴───────────────────────────┐
-        ↓                                                       ↓
-┌───────────────────────────────┐       ┌───────────────────────────────────┐
-│ 2a. 数据收集 (scene.py)        │       │ 2b. 模型评估 (eval.py)              │
-│     前4部分实现                 │       │     第8部分实现                     │
-├───────────────────────────────┤       ├───────────────────────────────────┤
-│ execute_waypoints_phased():   │       │ IndependentEnvRunner.start():     │
-│ ├── 每帧: evaluate_phase_...  │       │ ├── 每帧: env.step(action)        │
-│ ├── 设置: _current_phase_type │       │ ├── 每帧: env.evaluate_current_phase()│
-│ └── do_record() → obs.misc    │       │ └── 统计: phase_success_counts    │
-└───────────────────────────────┘       └───────────────────────────────────┘
-        ↓                                                       ↓
-┌───────────────────────────────┐       ┌───────────────────────────────────┐
-│ 3a. 数据保存                   │       │ 3b. 结果保存                        │
-│     dataset_generator.py       │       │     eval_data.csv                  │
-│     → pickle.dump(demo)       │       │     ├── phase_1_success_rate      │
-│     → obs.misc 含阶段标签      │       │     ├── phase_2_success_rate      │
-└───────────────────────────────┘       │     ├── phase_3_success_rate      │
-        ↓                               │     ├── phase_4_success_rate      │
-┌───────────────────────────────┐       │     └── avg_max_phase             │
-│ 4a. 训练加载                   │       └───────────────────────────────────┘
-│     launch_utils.py            │
-│     → replay.add(obs_dict)    │
-└───────────────────────────────┘
-```
-
----
-
-### 8.5 评估指标说明
-
-| 指标 | 计算方式 | 说明 |
-|------|---------|------|
-| `phase_1_success_rate` | phase_1_count / total_episodes | 阶段1（预操作）成功率 |
-| `phase_2_success_rate` | phase_2_count / total_episodes | 阶段2（抓取）成功率 |
-| `phase_3_success_rate` | phase_3_count / total_episodes | 阶段3（清道）成功率 |
-| `phase_4_success_rate` | phase_4_count / total_episodes | 阶段4（拿起）条件完成率，由环境 `PhasedSuccessEvaluator` 统计 |
-| `avg_max_phase` | mean(max_phases_reached) | 平均最大达到阶段（1-4） |
-| `success_count` | rollout 正常完成数 | episode 正常跑完并进入统计的数量，不等价于 reward 成功数 |
-| `failed_count` | rollout 异常/中断数 | 通信错误、`StopIteration`、其他异常等未正常完成的数量 |
-| `success_rate` | success_count / (success_count + failed_count) | rollout 无异常完成率，不是任务 reward 成功率 |
-| scheme 分层 success rate | reward_success_count / scheme_total | `reward > 0.99` 的任务成功率，按 `left_grasper/right_grasper/unknown` 分层统计 |
-
-**解读示例**：
-- `phase_1_success_rate=0.9, phase_2_success_rate=0.7` → 模型在抓取阶段有问题
-- `avg_max_phase=2.5` → 平均能完成到抓取阶段，但经常在清道阶段失败
-- `success_rate=1.0` 只表示评估 episode 没有异常中断；任务是否成功需要看 reward 相关统计或 scheme 分层 success rate
-
----
-
-### 8.6 实现验证清单
-
-#### 8.6.1 前置依赖检查（前5部分）
-
-| 检查项 | 脚本位置 | 状态 |
-|--------|---------|------|
-| `STRATEGY_TYPE` 类属性 | `bimanual_edge_phone.py:523` | ✅ 已实现 |
-| `EdgeOverhangCondition` 类 | `bimanual_edge_phone.py:48` | ✅ 已实现 |
-| `StableGraspCondition` 类 | `bimanual_edge_phone.py:109` | ✅ 已实现 |
-| `ClearPathCondition` 类 | `bimanual_edge_phone.py:159` | ✅ 已实现 |
-| `PhasedSuccessEvaluator` 类 | `bimanual_edge_phone.py:445` | ✅ 已实现 |
-| `_setup_phased_evaluator()` 方法 | `bimanual_edge_phone.py:573` | ✅ 已实现 |
-| `evaluate_phase_and_get_labels()` 方法 | `bimanual_edge_phone.py:710` | ✅ 已实现 |
-| `get_phase_progress()` 方法 | `bimanual_edge_phone.py:728` | ✅ 已实现 |
-
-#### 8.6.2 第8部分修改检查
-
-| 检查项 | 脚本位置 | 修改行号 | 状态 |
-|--------|---------|---------|------|
-| 导入 `Dict, Tuple` 类型 | `custom_rlbench_env.py:1` | 修改导入 | ✅ 已实现 |
-| `get_phase_progress()` 接口 | `custom_rlbench_env.py:337` | 新增方法 | ✅ 已实现 |
-| `evaluate_current_phase()` 接口 | `custom_rlbench_env.py:354` | 新增方法 | ✅ 已实现 |
-| `get_strategy_and_phase()` 接口 | `custom_rlbench_env.py:371` | 新增方法 | ✅ 已实现 |
-| 阶段统计初始化 | `_independent_env_runner.py:182` | 新增代码 | ✅ 已实现 |
-| 每帧阶段评估 | `_independent_env_runner.py:246` | 新增代码 | ✅ 已实现 |
-| Episode阶段统计 | `_independent_env_runner.py:278` | 新增代码 | ✅ 已实现 |
-| 阶段指标添加 | `_independent_env_runner.py:386` | 新增代码 | ✅ 已实现 |
-
----
-
-### 8.7 设计优势
-
-由于数据收集和评估使用相同的 `PhasedSuccessEvaluator`：
-1. **一致性**：训练数据标签与评估标准完全一致
-2. **可复用**：任务类中定义一次，数据收集和评估都使用
-3. **可解释性**：可以精确定位模型在哪个阶段失败
-4. **最小改动**：评估框架只需调用任务类已有的接口
-
----
-
-### 8.8 两层数据流分离（重要说明）
-
-> 本节说明性能评估与模型运行的数据流分离，避免概念混淆。
-
-#### 8.8.1 核心概念
-
-`ACT_BC_ENC_STRATEGY` 模型涉及两个独立的数据流：
-
-| 层面 | 数据来源 | 用途 | 代码位置 |
-|------|---------|------|---------|
-| **模型运行层面** | `StrategyPhasePredictor` 预测 | 条件注入，指导动作生成 | `detr_vae.py` |
-| **性能评估层面** | 环境 `PhasedSuccessEvaluator` | 统计各阶段成功率 | `_independent_env_runner.py` |
-
-#### 8.8.2 两层数据流完全独立
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 性能评估层面（本第8部分）                                                │
-│                                                                         │
-│   环境真实阶段 ──→ evaluate_current_phase() ──→ 统计 phase_success_rate │
-│                                                                         │
-│   用途：分析模型在哪个阶段失败（事后统计，不影响模型行为）               │
-└─────────────────────────────────────────────────────────────────────────┘
-
-                        ↕ 完全独立，互不影响
-
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 模型运行层面                                                             │
-│                                                                         │
-│   视觉特征 ──→ StrategyPhasePredictor ──→ 预测 strategy/phase           │
-│                        │                                                │
-│                        ▼                                                │
-│               条件注入到动作生成器 ──→ 生成动作                          │
-│                                                                         │
-│   用途：模型自主预测条件，端到端生成动作（不依赖环境提供条件）           │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### 8.8.3 设计决策说明
-
-**为什么不用环境真实阶段传给模型？**
-
-1. **端到端能力测试**：模型需要自己判断"当前处于什么阶段"
-2. **部署时无环境支持**：实际部署时没有环境提供阶段信息
-3. **训练-推理一致性**：训练和推理使用相同的条件来源（预测值）
-
-**为什么评估时用环境真实阶段？**
-
-1. **公平评估**：用客观标准评估模型表现
-2. **精确定位问题**：分析模型在哪个阶段失败
-3. **不影响模型行为**：统计是事后进行的
-
-#### 8.8.4 相关文档
-
-- 模型运行层面的详细设计：[STRATEGY_MODEL_DESIGN.md 第6节](../06_misc/act_family/STRATEGY_MODEL_DESIGN.md#6-推理流程端到端设计)
-- 条件预测器设计经验：[KEYPOINT_POSE_INJECTION_PLAN.md 6.6节](../06_misc/act_family/KEYPOINT_POSE_INJECTION_PLAN.md#66-条件预测与注入的经验教训来自-act_bc_enc_strategy)
-
----
-
-**文档版本**: 1.8
-**最后更新**: 2026-01-07
+**1.9版本更新说明**:
+- ✅ 按 `ONLINE_PHASE_EVAL_AND_ENV_VIS_PLAN.md` 刷新在线阶段评估说明
+  - `PhasedSuccessEvaluator` 更新为可回退在线状态机，`current_phase=5` 表示 Complete
+  - `phase_status` 改为由 `max_current_phase_reached` 推导的 episode 历史完成状态
+  - `ClearPathCondition` 不再依赖 lift waypoint，只检查辅助臂松开且远离目标物体
+  - runner 不再推进 evaluator，只读取 `env.get_phase_progress()`
+  - cinematic recorder overlay 改为读取 `env.get_env_overlay_state()` 的环境真实状态
+  - 同步更新四任务阈值、PPI smoke test 和 `phase_type=5` 的训练加载处理说明
 
 **1.8版本更新说明**:
 - ✅ **修复 `evaluate_current_phase()` 阶段漏记录 bug**
@@ -3353,7 +3226,7 @@ if total_episodes > 0:
 - ✅ 新增8.8节"两层数据流分离"
   - 说明性能评估层面 vs 模型运行层面的独立性
   - 解释为什么评估用环境真实阶段，模型用 Predictor 预测
-  - 添加相关文档链接（STRATEGY_MODEL_DESIGN.md, KEYPOINT_POSE_INJECTION_PLAN.md）
+  - 旧版模型设计文档链接已在 1.9 中替换为当前仓库内的实现入口
 
 **1.6版本更新说明（重要）**:
 - ⚠️ **阶段条件设计从"累积条件"改为"非累积条件"**

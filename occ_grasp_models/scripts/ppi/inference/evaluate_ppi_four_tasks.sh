@@ -7,7 +7,7 @@ CUDA_VISIBLE_DEVICES=0 python eval_ppi.py \
     framework.eval_save_metrics=true \
     framework.eval_type=0 \
     framework.weight_name="train_ppi_ddp_four_tasks_ppi_20260413_joint4_seed0" \
-    'framework.ckpt_name="epoch=0270-val_loss=8.5909929_model"' \
+    'framework.ckpt_name="epoch=0340-val_loss=8.4984550_model"' \
     framework.jump_step=1 \
     framework.weightsdir="$(pwd)/eval_weights/bimanual_four_tasks" \
     framework.logdir="$(pwd)/eval_logs" \
@@ -16,7 +16,7 @@ CUDA_VISIBLE_DEVICES=0 python eval_ppi.py \
     rlbench.headless=true \
     rlbench.episode_length=450 \
     rlbench.task_name="four_tasks" \
-    rlbench.tasks=[bimanual_edge_phone,bimanual_pick_plate,bimanual_pick_fork,bimanual_pivot_phone] \
+    rlbench.tasks=[bimanual_pick_fork,bimanual_pivot_phone,bimanual_pick_plate,bimanual_edge_phone] \
     rlbench.demo_path="$(pwd)/data/eval_raw" \
     rlbench.cameras=["over_shoulder_left","over_shoulder_right","overhead","wrist_right","wrist_left","front"] \
     rlbench.cameras_pcd=["over_shoulder_left","over_shoulder_right","overhead","wrist_right","wrist_left","front"] \
@@ -38,7 +38,7 @@ CUDA_VISIBLE_DEVICES=0 python eval_ppi.py \
     method.policy.use_lang=true \
     method.policy.pointflow_num=200 \
     method.policy.text_prompt="smartphone" \
-    method.policy.text_prompts=[smartphone,plate,fork,smartphone] \
+    method.policy.text_prompts=[fork,smartphone,plate,smartphone] \
     method.policy.prompt_type="box" \
     method.policy.sample_type="rps" \
     method.policy.num_inference_steps=1000 \
