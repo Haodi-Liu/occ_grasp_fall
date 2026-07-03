@@ -27,6 +27,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             kernel_size=5,
             n_groups=8,
             cond_predict_scale=True,
+            obs_feature_projection_dim=None,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -36,7 +37,22 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         assert len(action_shape) == 1
         action_dim = action_shape[0]  # Da
         # obs_encoder 输出的单帧特征维度（Do）
-        obs_feature_dim = obs_encoder.output_shape()[0]
+        raw_obs_feature_dim = obs_encoder.output_shape()[0]
+        if obs_feature_projection_dim is None:
+            obs_feature_dim = raw_obs_feature_dim
+            obs_feature_projector = nn.Identity()
+        else:
+            obs_feature_dim = int(obs_feature_projection_dim)
+            if obs_feature_dim <= 0:
+                raise ValueError(
+                    "obs_feature_projection_dim must be positive or None, "
+                    f"got {obs_feature_projection_dim}."
+                )
+            obs_feature_projector = nn.Sequential(
+                nn.Linear(raw_obs_feature_dim, obs_feature_dim),
+                nn.LayerNorm(obs_feature_dim),
+                nn.Mish(),
+            )
 
         # ===== 构建扩散模型（ConditionalUnet1D） =====
         # 扩散对象维度：
@@ -62,6 +78,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         )
 
         self.obs_encoder = obs_encoder
+        self.obs_feature_projector = obs_feature_projector
         self.model = model
         self.noise_scheduler = noise_scheduler
         self.mask_generator = LowdimMaskGenerator(
@@ -73,6 +90,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         )
         self.normalizer = LinearNormalizer()
         self.horizon = horizon
+        self.raw_obs_feature_dim = raw_obs_feature_dim
         self.obs_feature_dim = obs_feature_dim
         self.action_dim = action_dim
         self.n_action_steps = n_action_steps
@@ -83,6 +101,9 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         if num_inference_steps is None:
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
+
+    def _encode_obs_features(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        return self.obs_feature_projector(self.obs_encoder(obs_dict))
     
     # ========= inference  ============
     def conditional_sample(self, 
@@ -154,7 +175,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # condition through global feature
             # 将 (B, To, ...) 拉平成 (B*To, ...)，逐帧编码
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._encode_obs_features(this_nobs)
             # (B*To, Do) -> (B, To*Do)
             global_cond = nobs_features.reshape(B, -1)
             # 扩散对象仅为动作：cond_data = (B, T, Da)
@@ -165,7 +186,7 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # condition through impainting
             # 逐帧编码后再 reshape 成时序特征
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._encode_obs_features(this_nobs)
             # (B*To, Do) -> (B, To, Do)
             nobs_features = nobs_features.reshape(B, To, -1)
             # 扩散对象包含动作 + obs特征
@@ -223,13 +244,13 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, 
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._encode_obs_features(this_nobs)
             # (B*To, Do) -> (B, To*Do) 作为 global_cond
             global_cond = nobs_features.reshape(batch_size, -1)
         else:
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._encode_obs_features(this_nobs)
             # (B*T, Do) -> (B, T, Do)
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)
             # 将 obs 特征拼入轨迹作为 inpainting 约束

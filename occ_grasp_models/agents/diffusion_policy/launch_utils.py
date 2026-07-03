@@ -68,6 +68,9 @@ def create_agent(cfg: DictConfig):
             kernel_size=int(getattr(cfg.method, "kernel_size", 5)),
             n_groups=int(getattr(cfg.method, "n_groups", 8)),
             cond_predict_scale=bool(getattr(cfg.method, "cond_predict_scale", True)),
+            obs_feature_projection_dim=getattr(
+                cfg.method, "obs_feature_projection_dim", None
+            ),
         )
     elif model_type == "transformer":
         obs_as_cond = bool(getattr(cfg.method, "obs_as_cond", True))
