@@ -780,7 +780,7 @@ class BimanualPivotPhone(BimanualTask):
             # Phase 1: 推向墙壁并撬动 (4个pusher路径点)
             {'arm': pusher_arm, 'waypoints': pusher_wps[:4], 'wait_after': 0.5},
             # Phase 2: 抓取翘起部分 (3个grasper路径点)
-            {'arm': grasper_arm, 'waypoints': grasper_wps[:3], 'wait_after': 0.5},
+            {'arm': grasper_arm, 'waypoints': grasper_wps[:3], 'wait_after': 1},
             # Phase 3: 辅助臂清道撤退 (1个pusher路径点)
             {'arm': pusher_arm, 'waypoints': [pusher_wps[4]], 'wait_after': 0.5},
             # Phase 4: 抬起物体 (1个grasper路径点)

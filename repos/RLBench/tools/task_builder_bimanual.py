@@ -10,6 +10,7 @@ from pyrep.robots.arms.dual_panda import PandaLeft, PandaRight
 from pyrep.robots.end_effectors.dual_panda_gripper import PandaGripperLeft, PandaGripperRight
 
 CURRENT_DIR = dirname(abspath(__file__))
+TEXT_FILE_ENCODING = 'utf-8'
 sys.path.insert(0, join(CURRENT_DIR, '..'))  # Use local RLBench rather than installed
 
 import traceback
@@ -115,14 +116,15 @@ class LoadedTask(object):
         return task_class, task_file
 
     def _create_python_file(self, task_file: str):
-        with open(join(CURRENT_DIR, 'assets', 'bimanual_task_template.txt'), 'r') as f:
+        with open(join(CURRENT_DIR, 'assets', 'bimanual_task_template.txt'),
+                  'r', encoding=TEXT_FILE_ENCODING) as f:
             file_content = f.read()
         class_name = self._file_to_class_name(task_file)
         file_content = file_content % (class_name,)
         new_file_path = join(CURRENT_DIR, '../rlbench/bimanual_tasks', task_file)
         if isfile(new_file_path):
             raise RuntimeError('File already exists. Will not override this.')
-        with open(new_file_path, 'w+') as f:
+        with open(new_file_path, 'w+', encoding=TEXT_FILE_ENCODING) as f:
             f.write(file_content)
 
     def _file_to_class_name(self, name):
@@ -264,10 +266,10 @@ class LoadedTask(object):
         old_file_path = join(CURRENT_DIR, '../rlbench/bimanual_tasks', self.task_file)
         old_class_name = self._file_to_class_name(self.task_file)
         new_class_name = self._file_to_class_name(name)
-        with open(old_file_path, 'r') as f:
+        with open(old_file_path, 'r', encoding=TEXT_FILE_ENCODING) as f:
             content = f.read()
         content = content.replace(old_class_name, new_class_name)
-        with open(old_file_path, 'w') as f:
+        with open(old_file_path, 'w', encoding=TEXT_FILE_ENCODING) as f:
             f.write(content)
 
         # Rename python task file
@@ -309,10 +311,10 @@ class LoadedTask(object):
         handle = Dummy(self.task_file.replace('.py', ''))
         handle.set_name(name)
 
-        with open(old_file_path, 'r') as f:
+        with open(old_file_path, 'r', encoding=TEXT_FILE_ENCODING) as f:
             content = f.read()
         content = content.replace(old_class_name, new_class_name)
-        with open(new_file_path, 'w') as f:
+        with open(new_file_path, 'w', encoding=TEXT_FILE_ENCODING) as f:
             f.write(content)
 
         # Rename .ttt
