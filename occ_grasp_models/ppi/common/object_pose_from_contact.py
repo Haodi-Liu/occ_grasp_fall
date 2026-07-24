@@ -32,6 +32,56 @@ T_OFFSET_INV = {
 }
 
 
+def validate_object_6d_pose(pose, context="object_6d_pose"):
+    if not isinstance(pose, dict):
+        raise ValueError(f"{context} must be a dictionary, got {type(pose).__name__}.")
+
+    expected_shapes = {
+        "position": (3,),
+        "quaternion": (4,),
+        "matrix": (4, 4),
+    }
+    if "orientation" in pose:
+        expected_shapes["orientation"] = (3,)
+
+    missing_keys = [key for key in expected_shapes if key not in pose]
+    if missing_keys:
+        raise ValueError(f"{context} is missing required keys: {missing_keys}.")
+
+    arrays = {}
+    for key, expected_shape in expected_shapes.items():
+        value = pose[key]
+        if value is None:
+            raise ValueError(f"{context}[{key!r}] is None.")
+        try:
+            value_array = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context}[{key!r}] is not numeric.") from exc
+        if value_array.shape != expected_shape:
+            raise ValueError(
+                f"{context}[{key!r}] has shape {value_array.shape}, "
+                f"expected {expected_shape}.")
+        if not np.all(np.isfinite(value_array)):
+            raise ValueError(f"{context}[{key!r}] contains non-finite values.")
+        arrays[key] = value_array
+
+    quaternion_norm = np.linalg.norm(arrays["quaternion"])
+    if not np.isclose(quaternion_norm, 1.0, rtol=0.0, atol=1e-4):
+        raise ValueError(
+            f"{context} quaternion norm is {quaternion_norm}, expected 1.")
+
+    matrix = arrays["matrix"]
+    if not np.allclose(
+            matrix[3], np.array([0.0, 0.0, 0.0, 1.0]),
+            rtol=0.0, atol=1e-6):
+        raise ValueError(f"{context} matrix is not a homogeneous transform.")
+    if not np.allclose(
+            arrays["position"], matrix[:3, 3],
+            rtol=0.0, atol=1e-5):
+        raise ValueError(
+            f"{context} position does not match the matrix translation.")
+
+
 def infer_task_name_from_data_path(data_path):
     if not data_path:
         raise ValueError("Cannot infer task name from an empty data_path.")
@@ -83,9 +133,30 @@ def recover_object_6d_pose(obs, task_name):
 
 
 def patch_demo_with_object_6d_pose(demo, task_name):
-    for obs in demo:
-        if not hasattr(obs, "object_6d_pose"):
-            obs.object_6d_pose = recover_object_6d_pose(obs, task_name)
+    for frame_index, obs in enumerate(demo):
+        context = f"object_6d_pose for task '{task_name}', frame {frame_index}"
+        pose = getattr(obs, "object_6d_pose", None)
+        try:
+            validate_object_6d_pose(pose, context=context)
+        except ValueError as error:
+            direct_pose_error = str(error)
+        else:
+            continue
+
+        try:
+            recovered_pose = recover_object_6d_pose(obs, task_name)
+        except (AttributeError, KeyError, TypeError, ValueError) as recovery_error:
+            raise ValueError(
+                f"{context} is invalid ({direct_pose_error}); "
+                f"contact-based recovery failed: {recovery_error}") from recovery_error
+
+        try:
+            validate_object_6d_pose(recovered_pose, context=context)
+        except ValueError as recovered_pose_error:
+            raise ValueError(
+                f"{context} is invalid and contact-based recovery produced "
+                f"another invalid pose: {recovered_pose_error}") from recovered_pose_error
+        obs.object_6d_pose = recovered_pose
     return demo
 
 

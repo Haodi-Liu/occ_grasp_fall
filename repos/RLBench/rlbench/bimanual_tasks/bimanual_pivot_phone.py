@@ -18,7 +18,7 @@ from pyrep.objects.dummy import Dummy
 from pyrep.objects.object import Object
 from pyrep.errors import ConfigurationPathError
 from pyrep.const import ConfigurationPathAlgorithms as Algos
-from rlbench.backend.conditions import JointCondition, Condition
+from rlbench.backend.conditions import Condition, GraspedCondition, JointCondition
 from rlbench.backend.task import Task, BimanualTask
 from rlbench.backend.robot import BimanualRobot
 
@@ -389,30 +389,39 @@ class ArmRoleSelector:
 class PhasedSuccessEvaluator:
     """
     分阶段成功条件评估器。
+
+    低速稳定抓取只负责进入 Phase 3；Phase 3/4 由直接抓取状态维持。
     """
 
-    def __init__(self, stage_conditions: Dict[int, Condition]):
+    def __init__(self, stage_conditions: Dict[int, Condition],
+                 grasp_held_condition: Condition):
         self.stage_conditions = stage_conditions
+        self.grasp_held_condition = grasp_held_condition
         self.num_phases = 4
         self.current_phase = 1
         self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
         self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
+        self._last_grasp_held = False
 
     def reset(self):
         self.current_phase = 1
         self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
         self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
+        self._last_grasp_held = False
         for cond in self.stage_conditions.values():
             if hasattr(cond, 'reset'):
                 cond.reset()
+        self.grasp_held_condition.reset()
 
     def _sample_conditions_once(self) -> Dict[int, bool]:
         status = {}
         for phase_id in range(1, self.num_phases + 1):
             cond = self.stage_conditions.get(phase_id)
             status[phase_id] = bool(cond.condition_met()[0]) if cond is not None else False
+        self._last_grasp_held = bool(
+            self.grasp_held_condition.condition_met()[0])
         self._last_condition_status = status
         return status
 
@@ -422,7 +431,7 @@ class PhasedSuccessEvaluator:
         if phase == 2:
             return cond[1]
         if phase in (3, 4):
-            return cond[2]
+            return self._last_grasp_held
         return True
 
     def _transition_met(self, phase: int, cond: Dict[int, bool]) -> bool:
@@ -431,9 +440,9 @@ class PhasedSuccessEvaluator:
         if phase == 2:
             return cond[1] and cond[2]
         if phase == 3:
-            return cond[2] and cond[3]
+            return self._last_grasp_held and cond[3]
         if phase == 4:
-            return cond[2] and cond[4]
+            return self._last_grasp_held and cond[4]
         return False
 
     def evaluate_current_phase(self) -> Tuple[bool, int]:
@@ -481,6 +490,7 @@ class PhasedSuccessEvaluator:
             'completed': self.is_task_successful(),
             'phase_status': self._phase_completion_status.copy(),
             'condition_status': self._last_condition_status.copy(),
+            'grasp_held': self._last_grasp_held,
         }
 
 
@@ -605,6 +615,9 @@ class BimanualPivotPhone(BimanualTask):
             grasper_gripper, self.target_object,
             velocity_threshold=0.1, required_stable_frames=3
         )
+        grasp_held_condition = GraspedCondition(
+            grasper_gripper, self.target_object
+        )
         con3 = ClearPathCondition(
             pusher_gripper, self.target_object, pusher_tip,
             lift_waypoints=lift_waypoints, min_clearance=0.2
@@ -618,7 +631,9 @@ class BimanualPivotPhone(BimanualTask):
             4: con4,
         }
 
-        self.phased_evaluator = PhasedSuccessEvaluator(stage_conditions)
+        self.phased_evaluator = PhasedSuccessEvaluator(
+            stage_conditions, grasp_held_condition
+        )
         logging.info("PhasedSuccessEvaluator initialized successfully for BimanualPivotPhone")
 
     def init_episode(self, index: int) -> List[str]:
@@ -818,7 +833,8 @@ class BimanualPivotPhone(BimanualTask):
                     'max_current_phase_reached': 1, 'max_completed_phase': 0,
                     'total_phases': 4, 'completed': False,
                     'phase_status': {1: False, 2: False, 3: False, 4: False},
-                    'condition_status': {1: False, 2: False, 3: False, 4: False}}
+                    'condition_status': {1: False, 2: False, 3: False, 4: False},
+                    'grasp_held': False}
         return self.phased_evaluator.get_phase_progress()
 
     def get_role_assignment(self) -> Dict[str, str]:

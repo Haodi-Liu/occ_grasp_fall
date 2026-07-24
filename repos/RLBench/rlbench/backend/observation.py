@@ -3,6 +3,7 @@ import numpy as np
 from typing import List
 from typing import Dict
 from typing import Any
+from typing import Optional
 
 from dataclasses import dataclass
 from dataclasses import field
@@ -33,7 +34,7 @@ class Observation:
     
     misc: Dict[str, Any]
 
-    # object_6d_pose: Dict[str, np.ndarray]
+    object_6d_pose: Optional[Dict[str, np.ndarray]]
 
     @property
     @abstractmethod

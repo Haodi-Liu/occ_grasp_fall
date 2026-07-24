@@ -109,6 +109,11 @@ class Scene(object):
         # ====== 新增：策略和阶段标签状态变量 ======
         self._current_strategy_type = None
         self._current_phase_type = None
+        # self._current_execution_phase_index = None
+        # self._current_execution_phase_count = None
+        # self._current_execution_phase_arm = None
+        # self._current_execution_phase_waypoints = None
+        # self._current_execution_waypoint = None
 
     def load(self, task: Task) -> None:
         """Loads the task and positions at the centre of the workspace.
@@ -148,6 +153,11 @@ class Scene(object):
         """
 
         self._variation_index = index
+        # self._current_execution_phase_index = None
+        # self._current_execution_phase_count = None
+        # self._current_execution_phase_arm = None
+        # self._current_execution_phase_waypoints = None
+        # self._current_execution_waypoint = None
         if not self._has_init_task:
             self.init_task()
 
@@ -219,6 +229,72 @@ class Scene(object):
 
         self.robot.left_arm.set_joint_positions(self._start_arm_joint_pos[1], disable_dynamics=True)
         self.robot.left_gripper.set_joint_positions(self._starting_gripper_joint_pos[1], disable_dynamics=True)
+
+
+    def _get_object_6d_pose(self):
+        target_object = getattr(self.task, "target_object", None)
+        if target_object is None:
+            return None
+
+        task_name = self.task.get_name()
+        if not target_object.still_exists():
+            raise RuntimeError(
+                f"Cannot record object_6d_pose for '{task_name}': "
+                "target_object no longer exists.")
+
+        object_6d_pose = {
+            "position": np.asarray(
+                target_object.get_position(relative_to=None),
+                dtype=np.float32),
+            "quaternion": np.asarray(
+                target_object.get_quaternion(relative_to=None),
+                dtype=np.float32),
+            "orientation": np.asarray(
+                target_object.get_orientation(relative_to=None),
+                dtype=np.float32),
+            "matrix": np.asarray(
+                target_object.get_matrix(relative_to=None),
+                dtype=np.float32),
+        }
+
+        expected_shapes = {
+            "position": (3,),
+            "quaternion": (4,),
+            "orientation": (3,),
+            "matrix": (4, 4),
+        }
+        for key, expected_shape in expected_shapes.items():
+            value = object_6d_pose[key]
+            if value.shape != expected_shape:
+                raise RuntimeError(
+                    f"Invalid object_6d_pose for '{task_name}': {key} "
+                    f"has shape {value.shape}, expected {expected_shape}.")
+            if not np.all(np.isfinite(value)):
+                raise RuntimeError(
+                    f"Invalid object_6d_pose for '{task_name}': {key} "
+                    "contains non-finite values.")
+
+        quaternion_norm = np.linalg.norm(object_6d_pose["quaternion"])
+        if not np.isclose(quaternion_norm, 1.0, rtol=0.0, atol=1e-4):
+            raise RuntimeError(
+                f"Invalid object_6d_pose for '{task_name}': quaternion "
+                f"norm is {quaternion_norm}, expected 1.")
+
+        matrix = object_6d_pose["matrix"]
+        if not np.allclose(
+                matrix[3], np.array([0.0, 0.0, 0.0, 1.0]),
+                rtol=0.0, atol=1e-6):
+            raise RuntimeError(
+                f"Invalid object_6d_pose for '{task_name}': matrix is not "
+                "a homogeneous transform.")
+        if not np.allclose(
+                object_6d_pose["position"], matrix[:3, 3],
+                rtol=0.0, atol=1e-5):
+            raise RuntimeError(
+                f"Invalid object_6d_pose for '{task_name}': position does "
+                "not match the matrix translation.")
+
+        return object_6d_pose
 
 
     def get_observation(self) -> Observation:
@@ -368,25 +444,9 @@ class Scene(object):
         observation_data.update({
             "task_low_dim_state": task_low_dim_state,
             "perception_data": perception_data,
-            "misc": self._get_misc()
+            "misc": self._get_misc(),
+            "object_6d_pose": self._get_object_6d_pose(),
         })
-
-        # ########################### get object 6d pose ###########################
-        # object_6d_pose = {}
-        # object_nh = Shape('ball')
-        # object_6d_pose['position'] = object_nh.get_position()  # [x, y, z]
-        # object_6d_pose['orientation'] = object_nh.get_orientation()  # [alpha, beta, gamma]
-        # object_6d_pose['quaternion'] = object_nh.get_quaternion()
-        # object_6d_pose['matrix'] = object_nh.get_matrix()
-
-        # observation_data.update({
-        #     "task_low_dim_state": task_low_dim_state,
-        #     "perception_data": perception_data,
-        #     "misc": self._get_misc(),
-        #     "object_6d_pose": object_6d_pose,
-        # })
-        # ########################### get object 6d pose ###########################
-        
 
         if self.robot.is_bimanual:
             obs = BimanualObservation(**observation_data)
@@ -587,6 +647,7 @@ class Scene(object):
         phase before the other arm starts, with optional wait times between phases.
         """
         execution_phases = self.task.execution_phases
+        # self._current_execution_phase_count = len(execution_phases)
 
         # Build waypoint name -> waypoint object mapping
         all_waypoints = self.task.get_waypoints()
@@ -599,6 +660,10 @@ class Scene(object):
             arm_name = phase['arm']
             waypoint_names = phase['waypoints']
             wait_after = phase.get('wait_after', 0)
+            # self._current_execution_phase_index = phase_idx + 1
+            # self._current_execution_phase_arm = arm_name
+            # self._current_execution_phase_waypoints = list(waypoint_names)
+            # self._current_execution_waypoint = None
 
             logging.info(f"=== Phase {phase_idx + 1}: {arm_name} arm executing {waypoint_names} ===")
 
@@ -615,6 +680,7 @@ class Scene(object):
                     continue
 
                 point = waypoint_by_name[wp_name]
+                # self._current_execution_waypoint = wp_name
                 self._ignore_collisions_for_current_waypoint = point._ignore_collisions
 
                 point.start_of_path()
@@ -691,6 +757,7 @@ class Scene(object):
             # Wait after phase for stability
             if wait_after > 0:
                 logging.info(f"Waiting {wait_after} seconds for stability...")
+                # self._current_execution_waypoint = None
                 wait_steps = int(wait_after * 50)  # ~50Hz simulation
                 for _ in range(wait_steps):
                     self.step()
@@ -758,6 +825,9 @@ class Scene(object):
             for _ in range(10):
                 self.pyrep.step()
                 self.task.step()
+                if hasattr(self.task, 'evaluate_phase_and_get_labels'):
+                    self._current_strategy_type, self._current_phase_type = \
+                        self.task.evaluate_phase_and_get_labels()
                 do_record()
                 success, term = self.task.success()
                 if success:
@@ -818,6 +888,9 @@ class Scene(object):
         if 'close_gripper(' in ext:
             for g_obj in self.task.get_graspable_objects():
                 self.robot.grasp(g_obj, name)
+        if hasattr(self.task, 'evaluate_phase_and_get_labels'):
+            self._current_strategy_type, self._current_phase_type = \
+                self.task.evaluate_phase_and_get_labels()
         do_record()
 
     def get_observation_config(self) -> ObservationConfig:
@@ -976,10 +1049,30 @@ class Scene(object):
         # ===== 新增1：策略类型和阶段类型 =====
         # 这两个值在 execute_waypoints_bimanual_phased() 中动态更新
         if self._current_strategy_type is not None:
+            phase_type = int(self._current_phase_type)
+            if phase_type == 5:
+                # 5 is the evaluator's internal "all four phases complete"
+                # state, not a fifth phase label in collected observations.
+                phase_type = 4
+            elif phase_type not in (1, 2, 3, 4):
+                raise RuntimeError(
+                    f"Invalid phase label {phase_type}; expected 1, 2, 3, or 4.")
             misc.update({
                 "strategy_type": self._current_strategy_type,
-                "phase_type": self._current_phase_type
+                "phase_type": phase_type
             })
+
+        # ===== 新增1b：基于 execution_phases 的实际执行阶段 =====
+        # 这些字段反映当前正在执行的 waypoint phase，用于视频切片和可视化；
+        # 不依赖任务状态评估器，避免物理状态导致阶段标签提前或滞后。
+        # if self._current_execution_phase_index is not None:
+        #     misc.update({
+        #         "execution_phase_index": self._current_execution_phase_index,
+        #         "execution_phase_count": self._current_execution_phase_count,
+        #         "execution_phase_arm": self._current_execution_phase_arm,
+        #         "execution_phase_waypoints": self._current_execution_phase_waypoints,
+        #         "execution_waypoint": self._current_execution_waypoint,
+        #     })
 
         # ===== 新增2：关键点位姿收集（每帧从Dummy对象读取）=====
         KEYPOINT_MAPPING = {
