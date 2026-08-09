@@ -760,7 +760,7 @@ class BimanualEdgePhone(BimanualTask):
         )
         con3 = ClearPathCondition(
             pusher_gripper, self.target_object, pusher_tip,
-            lift_waypoints=lift_waypoints, min_clearance=0.33
+            lift_waypoints=lift_waypoints, min_clearance=0.34
         )
         con4 = LiftedCondition(self.target_object, min_height=1)
 
@@ -791,7 +791,7 @@ class BimanualEdgePhone(BimanualTask):
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
 
-        return ['push the phone over the box edge and grasp it from below']
+        return ['Pick up the phone, creating sufficient space for a grasp if direct access is obstructed.']
 
     # def step(self) -> None:
     #     """每个仿真步骤都会被调用，用于追踪阶段指标"""

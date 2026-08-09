@@ -101,6 +101,9 @@ class Scene(object):
                self.robot.left_arm.get_objects_in_tree(object_type=ObjectType.SHAPE)]
                self._right_execute_demo_joint_position_action = None
                self._left_execute_demo_joint_position_action = None
+               self._right_commanded_gripper_state = None
+               self._left_commanded_gripper_state = None
+               self._reset_bimanual_action_commands()
         else:
             self._robot_shapes = self.robot.arm.get_objects_in_tree(
                 object_type=ObjectType.SHAPE)
@@ -114,6 +117,30 @@ class Scene(object):
         # self._current_execution_phase_arm = None
         # self._current_execution_phase_waypoints = None
         # self._current_execution_waypoint = None
+
+    def _reset_bimanual_action_commands(self):
+        if not (
+                self.robot.is_bimanual
+                and self._obs_config.record_bimanual_action_commands):
+            return
+        self._right_execute_demo_joint_position_action = np.asarray(
+            self.robot.right_arm.get_joint_target_positions(),
+            dtype=np.float32)
+        self._left_execute_demo_joint_position_action = np.asarray(
+            self.robot.left_arm.get_joint_target_positions(),
+            dtype=np.float32)
+        self._right_commanded_gripper_state = 1.0
+        self._left_commanded_gripper_state = 1.0
+
+    def _set_bimanual_gripper_command(self, name, command):
+        if not (
+                self.robot.is_bimanual
+                and self._obs_config.record_bimanual_action_commands):
+            return
+        if name in ('right', 'both'):
+            self._right_commanded_gripper_state = float(command)
+        if name in ('left', 'both'):
+            self._left_commanded_gripper_state = float(command)
 
     def load(self, task: Task) -> None:
         """Loads the task and positions at the centre of the workspace.
@@ -207,6 +234,7 @@ class Scene(object):
             self.task.cleanup_()
             self.task.restore_state(self._initial_task_state)
         self.task.set_initial_objects_in_scene()
+        self._reset_bimanual_action_commands()
 
     def reset_unimanual(self) -> None:
         arm, gripper = self._initial_robot_state   
@@ -722,7 +750,15 @@ class Scene(object):
 
                     # Record joint positions for both arms
                     executed_action = path.get_executed_joint_position_action()
-                    if arm_name == 'right':
+                    if self._obs_config.record_bimanual_action_commands:
+                        if executed_action is not None:
+                            executed_action = np.asarray(
+                                executed_action, dtype=np.float32)
+                            if arm_name == 'right':
+                                self._right_execute_demo_joint_position_action = executed_action
+                            else:
+                                self._left_execute_demo_joint_position_action = executed_action
+                    elif arm_name == 'right':
                         self._right_execute_demo_joint_position_action = executed_action
                         self._left_execute_demo_joint_position_action = self.robot.left_arm.get_joint_positions()
                     else:
@@ -761,8 +797,9 @@ class Scene(object):
                 wait_steps = int(wait_after * 50)  # ~50Hz simulation
                 for _ in range(wait_steps):
                     self.step()
-                    self._right_execute_demo_joint_position_action = self.robot.right_arm.get_joint_positions()
-                    self._left_execute_demo_joint_position_action = self.robot.left_arm.get_joint_positions()
+                    if not self._obs_config.record_bimanual_action_commands:
+                        self._right_execute_demo_joint_position_action = self.robot.right_arm.get_joint_positions()
+                        self._left_execute_demo_joint_position_action = self.robot.left_arm.get_joint_positions()
 
                     # ====== 新增：等待期间的双臂碰撞检测 ======
                     if self._check_dual_arm_collision():
@@ -850,6 +887,7 @@ class Scene(object):
         start_of_bracket = -1
         name = ext.split('_', maxsplit=1)[0]
         if 'open_gripper(' in ext:
+            self._set_bimanual_gripper_command(name, 1.0)
             self.robot.release_gripper(name)
             start_of_bracket = ext.index('open_gripper(') + 13
             contains_param = ext[start_of_bracket] != ')'
@@ -862,6 +900,7 @@ class Scene(object):
                     if self._obs_config.record_gripper_closing:
                         do_record()
         elif 'close_gripper(' in ext:
+            self._set_bimanual_gripper_command(name, 0.0)
             start_of_bracket = ext.index('close_gripper(') + 14
             contains_param = ext[start_of_bracket] != ')'
             if not contains_param:
@@ -1036,7 +1075,20 @@ class Scene(object):
         misc.update({"variation_index": self._variation_index})
 
         # ===== 原有：executed_demo_joint_position_action =====
-        if self.robot.is_bimanual and self._right_execute_demo_joint_position_action is not None:
+        if (self.robot.is_bimanual
+                and self._obs_config.record_bimanual_action_commands):
+            misc.update({
+                "right_executed_demo_joint_position_action": np.array(
+                    self._right_execute_demo_joint_position_action, copy=True),
+                "left_executed_demo_joint_position_action": np.array(
+                    self._left_execute_demo_joint_position_action, copy=True),
+                "right_commanded_gripper_state":
+                    self._right_commanded_gripper_state,
+                "left_commanded_gripper_state":
+                    self._left_commanded_gripper_state,
+            })
+        elif (self.robot.is_bimanual
+              and self._right_execute_demo_joint_position_action is not None):
             misc.update({"right_executed_demo_joint_position_action": self._right_execute_demo_joint_position_action,
                          "left_executed_demo_joint_position_action": self._left_execute_demo_joint_position_action})
             self._right_execute_demo_joint_position_action = None

@@ -7,6 +7,7 @@ from rlbench.action_modes.arm_action_modes import BimanualJointPosition, JointPo
 from rlbench.action_modes.gripper_action_modes import GripperActionMode
 from rlbench.action_modes.gripper_action_modes import BimanualGripperJointPosition, GripperJointPosition
 from rlbench.action_modes.gripper_action_modes import BimanualDiscrete
+from rlbench.backend.exceptions import InvalidActionError
 from rlbench.backend.scene import Scene
 
 
@@ -135,24 +136,23 @@ class BimanualJointPositionActionMode(ActionMode):
         super(BimanualJointPositionActionMode, self).__init__(arm_action_mode, gripper_action_mode)
 
     def action(self, scene: Scene, action: np.ndarray):
+        action = np.asarray(action, dtype=np.float32)
+        if action.shape != (16,):
+            raise InvalidActionError(
+                "Expected bimanual joint action shape (16,), got %s."
+                % (action.shape,)
+            )
 
-        assert(action.shape == (16,))
-
-        
-        arm_act_size = np.prod(self.arm_action_mode.action_shape(scene))
-        assert(arm_act_size == 14)
-
-        arm_action = np.concatenate([action[0:7], action[8:15]], axis=0 )
-        ee_action = np.array([action[7], action[15]])
-
+        arm_action = np.concatenate(
+            [action[0:7], action[8:15]],
+            axis=0,
+        )
+        ee_action = action[[7, 15]].copy()
 
         self.arm_action_mode.action_pre_step(scene, arm_action)
-        self.gripper_action_mode.action_pre_step(scene, ee_action)
-
         self.arm_action_mode.action_step(scene)
-
         self.arm_action_mode.action_post_step(scene, arm_action)
-        self.gripper_action_mode.action_post_step(scene, ee_action)
+        self.gripper_action_mode.action(scene, ee_action)
 
     def action_shape(self, scene: Scene):
         return np.prod(self.arm_action_mode.action_shape(scene)) + np.prod(

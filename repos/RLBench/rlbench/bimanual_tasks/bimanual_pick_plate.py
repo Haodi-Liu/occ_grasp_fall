@@ -638,7 +638,7 @@ class BimanualPickPlate(BimanualTask):
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
 
-        return ['press the plate edge to tilt it and pick it up']
+        return ['Pick up the plate, creating sufficient space for a grasp if direct access is obstructed.']
 
     # def step(self) -> None:
     #     """每个仿真步骤都会被调用，用于追踪阶段指标"""
@@ -696,7 +696,7 @@ class BimanualPickPlate(BimanualTask):
         # ===== [临时] 仅收集 left_grasper 方案，否则跳过 =====
         # 恢复正常收集：注释掉下面2行
         # from rlbench.backend.exceptions import DemoError
-        # if self.active_waypoint_mode != 'right_grasper':
+        # if self.active_waypoint_mode != 'left_grasper':
         #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want left_grasper", self)
 
         self._setup_phased_evaluator()

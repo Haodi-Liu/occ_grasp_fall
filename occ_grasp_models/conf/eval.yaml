@@ -1,13 +1,13 @@
 defaults:
-    - method: ACT_BC_VISION
+    - method: DIFFUSION_POLICY
 
 
 rlbench:
     task_name: "multi"
     tasks: [bimanual_pick_plate,bimanual_pick_fork,bimanual_edge_phone,bimanual_pivot_phone]
-    demo_path: /raid/hdliu_raid/datasets/rlbench_data
+    demo_path: /mnt/rlbench_data
     episode_length: 400  # Must match training for time_in_state consistency
-    cameras: ["overhead"]
+    cameras: ["overhead","wrist_right","wrist_left"]
     camera_resolution: [256, 256]
     scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6]
     include_lang_goal_in_obs: True
@@ -24,7 +24,7 @@ framework:
     tensorboard_logging: True
     csv_logging: True
     gpu: 0
-    logdir: '/raid/hdliu_raid/arm_test/bimanual_four_task'
+    logdir: '/home/hdliu/arm_test/bimanual_four_task'
     start_seed: 0
     record_every_n: 20
 
@@ -41,7 +41,16 @@ cinematic_recorder:
     camera_resolution: [1280, 720]
     fps: 30
     rotate_speed: 0.005
-    save_path: '/raid/hdliu_raid/arm_test/bimanual_four_task/multi/ACT_BC_VISION/seed0'
+    save_path: '/home/hdliu/arm_test/bimanual_four_task/multi/DIFFUSION_POLICY/seed0'
+    save_video: True
+    save_frame_dir: null
+    save_every: 1
+    save_start_frame: 0
+    save_square_crop: False
+    frame_crop: null
+    frame_crop_scale: 0.8333333333333334
+    frame_x_bias: 0.44
+    frame_y_bias: 0.50
     overlay_enabled: True
     overlay_source: "env"
     overlay_draw_keypoints: True

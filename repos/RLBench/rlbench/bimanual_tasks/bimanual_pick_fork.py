@@ -607,7 +607,7 @@ class BimanualPickFork(BimanualTask):
         # ====== 单独阶段条件定义 ======
         con1 = GraspPointHeightCondition(
             self.grasp_pt, self.target_object,
-            min_height=0.75,  # 翘起高度阈值（叉子较小，阈值略低）
+            min_height=0.76,  # 翘起高度阈值（叉子较小，阈值略低）
             velocity_threshold=0.2, required_stable_frames=3
         )
         con2 = StableGraspCondition(
@@ -645,9 +645,17 @@ class BimanualPickFork(BimanualTask):
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
 
-        return ['press the fork head to tilt the handle and pick it up']
+        return ['Pick up the fork, creating sufficient space for a grasp if direct access is obstructed.']
 
     def post_placement_setup(self) -> None:
+
+        # ===== [强制测试] 使用 right_grasper 方案 =====
+        # 恢复自动选择：注释掉下面4行，取消注释自动选择部分
+        # self.active_waypoint_mode = 'right_grasper'
+        # self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
+        # self._setup_waypoint_mapping()
+        # logging.info(f"[FORCE TEST] Using right_grasper scheme")
+
         """在场景随机放置后选择方案并设置评估器"""
         self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
             self.waypoint_sets,
@@ -662,8 +670,8 @@ class BimanualPickFork(BimanualTask):
         # ===== [临时] 仅收集 left_grasper 方案，否则跳过 =====
         # 恢复正常收集：注释掉下面2行
         # from rlbench.backend.exceptions import DemoError
-        # if self.active_waypoint_mode != 'left_grasper':
-        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want left_grasper", self)
+        # if self.active_waypoint_mode != 'right_grasper':
+        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want right_grasper", self)
         
         self._setup_phased_evaluator()
         if self.phased_evaluator:

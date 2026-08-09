@@ -608,7 +608,7 @@ class BimanualPivotPhone(BimanualTask):
         # ====== 单独阶段条件定义 ======
         con1 = GraspPointHeightCondition(
             self.grasp_pt, self.target_object,
-            min_height=0.8,
+            min_height=0.81,
             velocity_threshold=0.2, required_stable_frames=3
         )
         con2 = StableGraspCondition(
@@ -648,7 +648,7 @@ class BimanualPivotPhone(BimanualTask):
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
 
-        return ['push the phone against the wall and pivot it to grasp']
+        return ['Pick up the phone, creating sufficient space for a grasp if direct access is obstructed.']
 
     def base_rotation_bounds(self):
         """
@@ -736,8 +736,8 @@ class BimanualPivotPhone(BimanualTask):
         # ===== [临时] 仅收集 left_grasper 方案，否则跳过 =====
         # 恢复正常收集：注释掉下面2行
         # from rlbench.backend.exceptions import DemoError
-        # if self.active_waypoint_mode != 'left_grasper':
-        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want left_grasper", self)
+        # if self.active_waypoint_mode != 'right_grasper':
+        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want right_grasper", self)
 
         self._setup_phased_evaluator()
         if self.phased_evaluator:

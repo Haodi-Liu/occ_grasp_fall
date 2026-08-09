@@ -284,14 +284,16 @@ class BimanualDiscrete(Discrete):
             scene.task.step()
 
     def action(self, scene: Scene, action: np.ndarray):
+        action = np.asarray(action, dtype=np.float32)
         assert_action_shape(action, self.action_shape(scene.robot))
-        if 0.0 > action[0] > 1.0:
+        if (not np.isfinite(action).all()
+                or np.any(action < 0.0)
+                or np.any(action > 1.0)):
             raise InvalidActionError(
-                'Gripper action expected to be within 0 and 1.')
+                'Bimanual gripper action must contain two finite values '
+                'in [0, 1].')
 
-        if 0.0 > action[1] > 1.0:
-            raise InvalidActionError(
-                'Gripper action expected to be within 0 and 1.')
+        binary_action = (action > 0.5).astype(np.float32)
 
         right_open_condition = all(
             x > 0.9 for x in scene.robot.right_gripper.get_open_amount())
@@ -302,15 +304,17 @@ class BimanualDiscrete(Discrete):
         right_current_ee = 1.0 if right_open_condition else 0.0
         left_current_ee = 1.0 if left_open_condition else 0.0
 
-        right_action = float(action[0] > 0.5)
-        left_action = float(action[1] > 0.5)
+        right_action = float(binary_action[0])
+        left_action = float(binary_action[1])
+        right_changed = right_current_ee != right_action
+        left_changed = left_current_ee != left_action
 
-        if right_current_ee != right_action or left_current_ee != left_action:
+        if right_changed or left_changed:
             if not self._detach_before_open:
-                self._actuate(scene, action)
+                self._actuate(scene, binary_action)
 
 
-        if right_current_ee != right_action:
+        if right_changed:
             if right_action == 0.0 and self._attach_grasped_objects:
                 # If gripper close action, the check for grasp.
                 left_grasped_objects = scene.robot.left_gripper.get_grasped_objects()
@@ -322,7 +326,7 @@ class BimanualDiscrete(Discrete):
             else:
                 # If gripper open action, the check for un-grasp.
                 scene.robot.right_gripper.release()
-        if left_current_ee != left_action:
+        if left_changed:
             if left_action == 0.0 and self._attach_grasped_objects:
                 right_grasped_objects = scene.robot.right_gripper.get_grasped_objects()
                 # If gripper close action, the check for grasp.                
@@ -335,10 +339,14 @@ class BimanualDiscrete(Discrete):
                 # If gripper open action, the check for un-grasp.
                 scene.robot.left_gripper.release()
 
-        if right_current_ee != right_action or left_current_ee != left_action:
+        if right_changed or left_changed:
             if self._detach_before_open:
-                self._actuate(scene, action)
-            if right_action == 1.0 or left_action == 1.0:
+                self._actuate(scene, binary_action)
+            opened_this_step = (
+                (right_changed and right_action == 1.0)
+                or (left_changed and left_action == 1.0)
+            )
+            if opened_this_step:
                 # Step a few more times to allow objects to drop
                 for _ in range(10):
                     scene.pyrep.step()
@@ -355,4 +363,7 @@ class BimanualDiscrete(Discrete):
 
         Returns: Returns the min and max of the action.
         """
-        return np.array([0]), np.array([0.04])
+        return (
+            np.array([0.0, 0.0], dtype=np.float32),
+            np.array([1.0, 1.0], dtype=np.float32),
+        )

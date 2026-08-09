@@ -58,7 +58,8 @@ class ObservationConfig(object):
                  record_gripper_closing=False,
                  task_low_dim_state=True,
                  record_ignore_collisions=True,
-                 robot_name=''
+                 robot_name='',
+                 record_bimanual_action_commands=False
                  ):
         self.camera_configs = camera_configs or dict()
         self.joint_velocities = joint_velocities
@@ -77,6 +78,7 @@ class ObservationConfig(object):
         self.task_low_dim_state = task_low_dim_state
         self.record_ignore_collisions = record_ignore_collisions
         self.robot_name = robot_name
+        self.record_bimanual_action_commands = record_bimanual_action_commands
 
     def set_all(self, value: bool):
         self.set_all_high_dim(value)

@@ -45,55 +45,153 @@ class TaskRecorder(object):
         self._fps = fps
         self._snaps = []
         self._current_snaps = []
+        self._current_frame_indices = []
+        self._frame_count = 0
         self._overlay_cfg = overlay_cfg
 
     def take_snap(self, obs: Observation):
         self._cam_motion.step()
         frame = (self._cam_motion.cam.capture_rgb() * 255.).astype(np.uint8)
         frame = self._apply_overlay(frame, obs)
-        self._current_snaps.append(frame)
+        frame_idx = self._frame_count
+        self._frame_count += 1
+
+        if self._should_keep_frame(frame_idx):
+            self._current_snaps.append(frame)
+            self._current_frame_indices.append(frame_idx)
     
     def save(self, path, lang_goal, reward):
-        print(f"Converting to video ... {path}")
+        print(f"Saving recording ... {path}")
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         image_size = self._cam_motion.cam.get_resolution()
+        save_video = self._save_video_enabled()
+        save_frame_dir = self._save_frame_dir()
 
-        # 创建一个空的列表来存储每一帧图像
-        frames = []
+        if save_frame_dir:
+            self._save_png_frames(path, save_frame_dir)
 
-        for image in self._current_snaps:
-            # 将图像从 RGB 转换为 BGR（OpenCV 使用 BGR）
-            frame = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        if save_video:
+            # 创建一个空的列表来存储每一帧图像
+            frames = []
 
-            font = cv2.FONT_HERSHEY_DUPLEX
-            font_scale = (0.45 * image_size[0]) / 640
-            font_thickness = 2
+            for image in self._current_snaps:
+                # 将图像从 RGB 转换为 BGR（OpenCV 使用 BGR）
+                frame = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-            if lang_goal:
-                lang_textsize = cv2.getTextSize(lang_goal, font, font_scale, font_thickness)[0]
-                lang_textX = (image_size[0] - lang_textsize[0]) // 2
+                font = cv2.FONT_HERSHEY_DUPLEX
+                font_scale = (0.45 * image_size[0]) / 640
+                font_thickness = 2
 
-                # 在图像上添加文本
-                frame = cv2.putText(frame, lang_goal, org=(lang_textX, image_size[1] - 35),
-                                    fontScale=font_scale, fontFace=font, color=(0, 0, 0),
-                                    thickness=font_thickness, lineType=cv2.LINE_AA)
+                if lang_goal:
+                    lang_textsize = cv2.getTextSize(lang_goal, font, font_scale, font_thickness)[0]
+                    lang_textX = (image_size[0] - lang_textsize[0]) // 2
 
-            # 将每一帧添加到 frames 列表中
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
+                    # 在图像上添加文本
+                    frame = cv2.putText(frame, lang_goal, org=(lang_textX, image_size[1] - 35),
+                                        fontScale=font_scale, fontFace=font, color=(0, 0, 0),
+                                        thickness=font_thickness, lineType=cv2.LINE_AA)
 
-        # 使用 imageio.mimsave 保存视频
-        imageio.mimsave(path, frames, fps=self._fps)
+                # 将每一帧添加到 frames 列表中
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame_rgb)
+
+            # 使用 imageio.mimsave 保存视频
+            imageio.mimsave(path, frames, fps=self._fps)
 
         # 清空当前的快照列表
         self._current_snaps = []
+        self._current_frame_indices = []
+        self._frame_count = 0
 
     def clear_current_snaps(self):
         """Clear current snapshots without saving to free memory"""
         num_snaps = len(self._current_snaps)
         self._current_snaps = []
+        self._current_frame_indices = []
+        self._frame_count = 0
         logging.info(f"Cleared {num_snaps} snapshots to free memory")
+
+    def _save_video_enabled(self):
+        cfg = self._overlay_cfg
+        if cfg is None:
+            return True
+        return bool(getattr(cfg, "save_video", True))
+
+    def _save_frame_dir(self):
+        cfg = self._overlay_cfg
+        if cfg is None:
+            return None
+        save_dir = getattr(cfg, "save_frame_dir", None)
+        if save_dir is None:
+            return None
+        save_dir = str(save_dir).strip()
+        return save_dir or None
+
+    def _save_every(self):
+        cfg = self._overlay_cfg
+        if cfg is None:
+            return 1
+        return max(1, int(getattr(cfg, "save_every", 1)))
+
+    def _save_start_frame(self):
+        cfg = self._overlay_cfg
+        if cfg is None:
+            return 0
+        return max(0, int(getattr(cfg, "save_start_frame", 0)))
+
+    def _should_keep_frame(self, frame_idx):
+        if self._save_video_enabled():
+            return True
+        if not self._save_frame_dir():
+            return False
+        if frame_idx < self._save_start_frame():
+            return False
+        return (frame_idx - self._save_start_frame()) % self._save_every() == 0
+
+    def _save_png_frames(self, video_path, save_frame_dir):
+        stem = os.path.splitext(os.path.basename(video_path))[0]
+        episode_frame_dir = os.path.join(save_frame_dir, stem)
+        os.makedirs(episode_frame_dir, exist_ok=True)
+
+        saved = 0
+        for frame_idx, image in zip(self._current_frame_indices, self._current_snaps):
+            if frame_idx < self._save_start_frame():
+                continue
+            if (frame_idx - self._save_start_frame()) % self._save_every() != 0:
+                continue
+
+            frame_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            frame_bgr, crop_suffix = self._maybe_crop_saved_frame(frame_bgr)
+            frame_path = os.path.join(
+                episode_frame_dir, f"{stem}_f{frame_idx:05d}{crop_suffix}.png"
+            )
+            cv2.imwrite(frame_path, frame_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            saved += 1
+        logging.info("Saved %d PNG frames to %s", saved, episode_frame_dir)
+
+    def _maybe_crop_saved_frame(self, frame_bgr):
+        cfg = self._overlay_cfg
+        if cfg is None or not bool(getattr(cfg, "save_square_crop", False)):
+            return frame_bgr, ""
+
+        height, width = frame_bgr.shape[:2]
+        crop = getattr(cfg, "frame_crop", None)
+        if crop is not None:
+            x, y, size = [int(v) for v in crop]
+        else:
+            crop_scale = float(getattr(cfg, "frame_crop_scale", 5.0 / 6.0))
+            x_bias = float(getattr(cfg, "frame_x_bias", 0.44))
+            y_bias = float(getattr(cfg, "frame_y_bias", 0.50))
+            size = int(round(min(width, height) * crop_scale))
+            size = max(1, min(size, width, height))
+            x = int(round((width - size) * x_bias))
+            y = int(round((height - size) * y_bias))
+
+        size = max(1, min(size, width, height))
+        x = max(0, min(x, width - size))
+        y = max(0, min(y, height - size))
+        return frame_bgr[y:y + size, x:x + size], f"_x{x}_y{y}_s{size}"
 
     def _get_env_overlay_state(self):
         if self._env is None:
@@ -148,9 +246,11 @@ class TaskRecorder(object):
             if gt_label:
                 text_parts.append(gt_label)
         text = " | ".join(text_parts)
+        scale = max(1.0, frame_bgr.shape[1] / 1280.0)
         self._draw_text_with_shadow(
-            frame_bgr, text, (20, 40), cv2.FONT_HERSHEY_DUPLEX, 0.8,
-            (255, 255, 255), 2
+            frame_bgr, text, (int(round(20 * scale)), int(round(40 * scale))),
+            cv2.FONT_HERSHEY_DUPLEX, 0.8 * scale,
+            (255, 255, 255), max(2, int(round(2 * scale)))
         )
 
     @staticmethod
@@ -233,11 +333,17 @@ class TaskRecorder(object):
         color, label = styles.get(name, ((255, 255, 255), name))
         u = int(round(float(uv[0])))
         v = int(round(float(uv[1])))
-        cv2.circle(frame_bgr, (u, v), 7, color, -1)
-        cv2.circle(frame_bgr, (u, v), 9, (255, 255, 255), 1)
+        scale = max(1.0, frame_bgr.shape[1] / 1280.0)
+        radius = max(5, int(round(7 * scale)))
+        outline_radius = max(radius + 2, int(round(9 * scale)))
+        thickness = max(1, int(round(scale)))
+        cv2.circle(frame_bgr, (u, v), radius, color, -1)
+        cv2.circle(frame_bgr, (u, v), outline_radius, (255, 255, 255), thickness)
         self._draw_text_with_shadow(
-            frame_bgr, label, (u + 10, v - 8), cv2.FONT_HERSHEY_DUPLEX, 0.48,
-            (255, 255, 255), 1
+            frame_bgr, label,
+            (u + int(round(10 * scale)), v - int(round(8 * scale))),
+            cv2.FONT_HERSHEY_DUPLEX, 0.48 * scale,
+            (255, 255, 255), thickness
         )
 
     def _draw_xyz_table(self, frame_bgr, points_3d, draw_keypoints, draw_grippers):

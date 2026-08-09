@@ -456,6 +456,34 @@ class HQAnnotatedDemoRecorder:
         self._camera = None
 
 
+def validate_bimanual_action_commands(demo):
+    if len(demo) == 0:
+        raise ValueError("Demo is empty.")
+
+    for step_idx, obs in enumerate(demo):
+        for side in ('right', 'left'):
+            target_key = f'{side}_executed_demo_joint_position_action'
+            gripper_key = f'{side}_commanded_gripper_state'
+
+            if target_key not in obs.misc or gripper_key not in obs.misc:
+                raise ValueError(
+                    f'Missing action command at step {step_idx}, side {side}.')
+
+            target = np.asarray(obs.misc[target_key], dtype=np.float32)
+            if target.shape != (7,) or not np.isfinite(target).all():
+                raise ValueError(
+                    f'Invalid {target_key} at step {step_idx}: {target!r}.')
+
+            gripper = np.asarray(
+                obs.misc[gripper_key], dtype=np.float32).reshape(-1)
+            if (gripper.shape != (1,)
+                    or not np.isfinite(gripper).all()
+                    or float(gripper[0]) not in (0.0, 1.0)):
+                raise ValueError(
+                    f'Invalid {gripper_key} at step {step_idx}: '
+                    f'{gripper!r}.')
+
+
 def save_demo(demo, example_path, variation, save_video=False, video_camera="front", video_fps=30):
     data_types = ["rgb", "depth", "point_cloud", "mask"]
     #full_camera_names = list(map(lambda x: ('_'.join(x), x[-1]), product(camera_names, data_types)))
@@ -536,6 +564,7 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
 
     obs_config = ObservationConfig()
     obs_config.set_all(True)
+    obs_config.record_bimanual_action_commands = True
 
     default_config_params = {"image_size": image_size, "depth_in_meters": False, "masks_as_one_channel": False}
     camera_configs = {camera_name: CameraConfig(**default_config_params) for camera_name in camera_names}
@@ -570,8 +599,8 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
 
 
         abort_variation = False
-        for ex_idx in range(episodes_per_task):
-        # for ex_idx in range(140, 150):  # 从episode100到episode130，共30个
+        # for ex_idx in range(episodes_per_task):
+        for ex_idx in range(15, 30):  # 从episode100到episode130，共30个
             attempts = 20           # 真正错误的重试次数
             scheme_skips = 0        # DemoError（方案过滤）计数
             max_scheme_skips = 20   # 方案过滤的最大重试次数（自由选择scheme时此值无影响）
@@ -622,6 +651,7 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
                         })
                     demo, = task_env.get_demos(
                         amount=1, live_demos=True, **demo_kwargs)
+                    validate_bimanual_action_commands(demo)
 
                     # ===== 获取并记录scheme信息 =====
                     active_scheme = 'unknown'

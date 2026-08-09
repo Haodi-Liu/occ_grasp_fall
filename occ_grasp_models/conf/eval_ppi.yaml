@@ -47,6 +47,15 @@ cinematic_recorder:
     fps: 30
     rotate_speed: 0.005
     save_path: ${framework.logdir}/${rlbench.task_name}/${framework.weight_name}
+    save_video: True
+    save_frame_dir: null
+    save_every: 1
+    save_start_frame: 0
+    save_square_crop: False
+    frame_crop: null
+    frame_crop_scale: 0.8333333333333334
+    frame_x_bias: 0.44
+    frame_y_bias: 0.50
     max_success_videos: 30
     max_fail_videos: 30
     overlay_enabled: True
