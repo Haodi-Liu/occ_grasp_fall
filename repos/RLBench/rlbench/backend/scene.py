@@ -1,6 +1,7 @@
 from typing import List, Callable, Tuple
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 from pyrep import PyRep
 from pyrep.const import ObjectType
 from pyrep.errors import ConfigurationPathError
@@ -19,6 +20,8 @@ from rlbench.backend.observation import Observation
 from rlbench.backend.observation import UnimanualObservationData
 from rlbench.backend.observation import UnimanualObservation
 from rlbench.backend.observation import BimanualObservation
+from rlbench.backend.bimanual_action_commands import (
+    ArmForwardKinematics, joint_target_fk_pose_key)
 
 from rlbench.backend.robot import Robot
 from rlbench.backend.robot import UnimanualRobot
@@ -31,6 +34,12 @@ from rlbench.noise_model import NoiseModel
 from rlbench.observation_config import ObservationConfig, CameraConfig
 
 STEPS_BEFORE_EPISODE_START = 10
+
+# Legacy pose-only task states supported by the direct test-layout reset.
+DEMO_LAYOUT_TASKS = frozenset((
+    'bimanual_edge_phone', 'bimanual_pick_fork',
+    'bimanual_pick_plate', 'bimanual_pivot_phone',
+))
 
 import logging
 
@@ -103,6 +112,14 @@ class Scene(object):
                self._left_execute_demo_joint_position_action = None
                self._right_commanded_gripper_state = None
                self._left_commanded_gripper_state = None
+               self._bimanual_action_fk = None
+               if self._obs_config.record_bimanual_action_commands:
+                   self._bimanual_action_fk = {
+                       'right': ArmForwardKinematics(
+                           self.robot.right_arm),
+                       'left': ArmForwardKinematics(
+                           self.robot.left_arm),
+                   }
                self._reset_bimanual_action_commands()
         else:
             self._robot_shapes = self.robot.arm.get_objects_in_tree(
@@ -215,6 +232,116 @@ class Scene(object):
 
         # Let objects come to rest
         [self.pyrep.step() for _ in range(STEPS_BEFORE_EPISODE_START)]
+        self._has_init_episode = True
+        return descriptions
+
+    def init_episode_from_demo(self, demo: Demo) -> List[str]:
+        """Restore a stored first frame without resampling expert waypoints."""
+        if not self.robot.is_bimanual or self.task.get_name() not in DEMO_LAYOUT_TASKS:
+            raise ValueError('Direct layout reset supports only the four OCC bimanual tasks.')
+        initial = getattr(demo, 'initial_observation', None)
+        scheme = getattr(demo, 'initial_arm_scheme', None)
+        if initial is None or initial.task_low_dim_state is None:
+            raise ValueError('Stored demo is missing its unfiltered initial task state.')
+        roles_by_scheme = {
+            'left_grasper': {'grasper': 'left', 'pusher': 'right'},
+            'right_grasper': {'grasper': 'right', 'pusher': 'left'},
+        }
+        if (not isinstance(scheme, dict)
+                or scheme.get('active_scheme') not in roles_by_scheme
+                or scheme.get('role_assignment') != roles_by_scheme[scheme['active_scheme']]):
+            raise ValueError('Stored demo needs one valid scheme_info_*.pkl file.')
+
+        self._has_init_episode = False
+        self.reset()
+        if not self._has_init_task:
+            self.init_task()
+        self._variation_index = int(demo.variation_number)
+        descriptions = self.task.init_episode(self._variation_index)
+
+        # get_low_dim_state() records task descendants in this same tree order.
+        # These four assets contain only Shapes and Dummies (one pose7 each).
+        objects = [obj for obj, obj_type in self.task._initial_objs_in_scene]
+        state = np.asarray(initial.task_low_dim_state, dtype=np.float64).reshape(-1)
+        if (any(obj_type not in (ObjectType.SHAPE, ObjectType.DUMMY)
+                for _, obj_type in self.task._initial_objs_in_scene)
+                or state.size != 7 * len(objects) or not np.isfinite(state).all()):
+            raise ValueError('Stored task state does not match the current task asset.')
+        poses = state.reshape(-1, 7)
+        norms = np.linalg.norm(poses[:, 3:], axis=1)
+        if not np.allclose(norms, 1.0, atol=1e-4, rtol=0):
+            raise ValueError('Stored task state contains invalid pose quaternions.')
+
+        # Old demos have no object-name list. Cross-check the target and named
+        # keypoints against their independent records before using tree order.
+        names = {obj.get_name(): i for i, obj in enumerate(objects)}
+        anchors = {self.task.target_object.get_name(): np.r_[
+            initial.object_6d_pose['position'], initial.object_6d_pose['quaternion']]}
+        for key, name in (('contact', initial.misc.get('contact_source')),
+                          ('grasp', 'grasp_pt'),
+                          ('affordance', initial.misc.get('affordance_source'))):
+            if name is not None:
+                anchors[name] = np.r_[initial.misc[key + '_position'],
+                                      initial.misc[key + '_quaternion']]
+        for name, expected in anchors.items():
+            if name not in names:
+                raise ValueError('Missing stored layout anchor: %s' % name)
+            actual = poses[names[name]]
+            if (not np.allclose(actual[:3], expected[:3], atol=1e-5, rtol=0)
+                    or not np.isclose(abs(np.dot(actual[3:], expected[3:])),
+                                      1.0, atol=1e-4, rtol=0)):
+                raise ValueError('Stored object order disagrees at %s' % name)
+
+        components = []
+        for side in ('right', 'left'):
+            arm_obs = getattr(initial, side)
+            for suffix, field in (('arm', 'joint_positions'),
+                                  ('gripper', 'gripper_joint_positions')):
+                component = getattr(self.robot, side + '_' + suffix)
+                positions = np.asarray(getattr(arm_obs, field), dtype=np.float64)
+                if positions.shape != (len(component.joints),) or not np.isfinite(positions).all():
+                    raise ValueError('Invalid initial %s %s positions.' % (side, suffix))
+                components.append((component, positions))
+        for component, positions in components:
+            component.set_joint_positions(positions, disable_dynamics=True)
+        self.robot.zero_velocity()
+        # disable_dynamics=True steps the native simulator. Finish all joints
+        # and task poses below without another physics step before observation.
+        for component, positions in components:
+            component.set_joint_positions(positions)
+            component.set_joint_target_positions(positions)
+
+        def depth(item):
+            obj, _ = item
+            level = 0
+            while obj.get_parent() is not None:
+                obj = obj.get_parent()
+                level += 1
+            return level
+
+        # Setting a parent moves its children: apply recorded world poses from
+        # parents to children while retaining the original object/pose pairing.
+        for obj in objects:
+            obj.reset_dynamic_object()
+        for obj, pose in sorted(zip(objects, poses), key=depth):
+            # Matrix writes keep orientations stable near +/-90 degree pitch.
+            matrix = np.eye(4)
+            matrix[:3, :3] = Rotation.from_quat(pose[3:]).as_matrix()
+            matrix[:3, 3] = pose[:3]
+            obj.set_matrix(matrix)
+
+        # Reuse task bookkeeping, without role selection, position clamping,
+        # or expert-waypoint validation that could change the selected layout.
+        self.task.active_waypoint_mode = scheme['active_scheme']
+        self.task.current_role_assignment = dict(scheme['role_assignment'])
+        self.task._setup_waypoint_mapping()
+        self.task._setup_phased_evaluator()
+        if self.task.phased_evaluator is None:
+            raise ValueError('Restored task is missing its phase evaluator.')
+        self.task.phased_evaluator.reset()
+        self._current_strategy_type = self.task.STRATEGY_TYPE
+        self._current_phase_type = 1
+        self._reset_bimanual_action_commands()
         self._has_init_episode = True
         return descriptions
 
@@ -1077,11 +1204,17 @@ class Scene(object):
         # ===== 原有：executed_demo_joint_position_action =====
         if (self.robot.is_bimanual
                 and self._obs_config.record_bimanual_action_commands):
+            right_target = np.array(
+                self._right_execute_demo_joint_position_action, copy=True)
+            left_target = np.array(
+                self._left_execute_demo_joint_position_action, copy=True)
             misc.update({
-                "right_executed_demo_joint_position_action": np.array(
-                    self._right_execute_demo_joint_position_action, copy=True),
-                "left_executed_demo_joint_position_action": np.array(
-                    self._left_execute_demo_joint_position_action, copy=True),
+                "right_executed_demo_joint_position_action": right_target,
+                "left_executed_demo_joint_position_action": left_target,
+                joint_target_fk_pose_key('right'):
+                    self._bimanual_action_fk['right'].pose(right_target),
+                joint_target_fk_pose_key('left'):
+                    self._bimanual_action_fk['left'].pose(left_target),
                 "right_commanded_gripper_state":
                     self._right_commanded_gripper_state,
                 "left_commanded_gripper_state":

@@ -1,10 +1,14 @@
 """
-BimanualPivotPhone - 靠墙撬起抓取任务
+BlockedPickFork - 按压翘起抓取叉子任务
 
-策略类型: 2 (WallLever)
+策略类型: 3 (PressTilt)
 四阶段执行：PreManipulation -> Grasp -> ClearPath -> Lift
 
-预操作：推手机到墙壁，利用墙面作为支点撬起
+预操作：按压叉子头部，利用杠杆原理使叉柄翘起
+
+Scheme-Based Design:
+- right_grasper: 右臂抓取 (waypoint0-7)
+- left_grasper: 左臂抓取 (waypoint0_a-7_a)
 """
 
 from typing import List, Dict, Tuple
@@ -18,7 +22,7 @@ from pyrep.objects.dummy import Dummy
 from pyrep.objects.object import Object
 from pyrep.errors import ConfigurationPathError
 from pyrep.const import ConfigurationPathAlgorithms as Algos
-from rlbench.backend.conditions import Condition, GraspedCondition, JointCondition
+from rlbench.backend.conditions import JointCondition, Condition
 from rlbench.backend.task import Task, BimanualTask
 from rlbench.backend.robot import BimanualRobot
 
@@ -34,10 +38,10 @@ STRATEGY_NAMES = {
 }
 
 PHASE_NAMES = {
-    1: "PreManipulation",  # 预操作：推手机到墙壁撬起
-    2: "Grasp",            # 抓取：抓住翘起部分
+    1: "PreManipulation",  # 预操作：按压叉子头部使叉柄翘起
+    2: "Grasp",            # 抓取：抓住翘起的叉柄
     3: "ClearPath",        # 清道：辅助臂移开
-    4: "Lift",             # 拿起：抬起手机
+    4: "Lift",             # 拿起：抬起叉子
     5: "Complete",         # 四阶段全部完成
 }
 
@@ -172,7 +176,7 @@ class LiftedCondition(Condition):
     抬起条件：检查物体是否被抬起到目标高度。
     """
 
-    def __init__(self, target_object: Shape, min_height: float = 0.9):
+    def __init__(self, target_object: Shape, min_height: float = 0.88):
         self.target_object = target_object
         self.min_height = min_height
 
@@ -185,7 +189,7 @@ class LiftedCondition(Condition):
 
 
 # ============================================================
-# 双臂角色选择器
+# 双臂角色选择器 (Scheme-Based)
 # ============================================================
 
 class ArmRoleSelector:
@@ -389,39 +393,30 @@ class ArmRoleSelector:
 class PhasedSuccessEvaluator:
     """
     分阶段成功条件评估器。
-
-    低速稳定抓取只负责进入 Phase 3；Phase 3/4 由直接抓取状态维持。
     """
 
-    def __init__(self, stage_conditions: Dict[int, Condition],
-                 grasp_held_condition: Condition):
+    def __init__(self, stage_conditions: Dict[int, Condition]):
         self.stage_conditions = stage_conditions
-        self.grasp_held_condition = grasp_held_condition
         self.num_phases = 4
         self.current_phase = 1
         self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
         self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
-        self._last_grasp_held = False
 
     def reset(self):
         self.current_phase = 1
         self.max_current_phase_reached = 1
         self._phase_completion_status = {i: False for i in range(1, self.num_phases + 1)}
         self._last_condition_status = {i: False for i in range(1, self.num_phases + 1)}
-        self._last_grasp_held = False
         for cond in self.stage_conditions.values():
             if hasattr(cond, 'reset'):
                 cond.reset()
-        self.grasp_held_condition.reset()
 
     def _sample_conditions_once(self) -> Dict[int, bool]:
         status = {}
         for phase_id in range(1, self.num_phases + 1):
             cond = self.stage_conditions.get(phase_id)
             status[phase_id] = bool(cond.condition_met()[0]) if cond is not None else False
-        self._last_grasp_held = bool(
-            self.grasp_held_condition.condition_met()[0])
         self._last_condition_status = status
         return status
 
@@ -431,7 +426,7 @@ class PhasedSuccessEvaluator:
         if phase == 2:
             return cond[1]
         if phase in (3, 4):
-            return self._last_grasp_held
+            return cond[2]
         return True
 
     def _transition_met(self, phase: int, cond: Dict[int, bool]) -> bool:
@@ -440,9 +435,9 @@ class PhasedSuccessEvaluator:
         if phase == 2:
             return cond[1] and cond[2]
         if phase == 3:
-            return self._last_grasp_held and cond[3]
+            return cond[2] and cond[3]
         if phase == 4:
-            return self._last_grasp_held and cond[4]
+            return cond[2] and cond[4]
         return False
 
     def evaluate_current_phase(self) -> Tuple[bool, int]:
@@ -490,7 +485,6 @@ class PhasedSuccessEvaluator:
             'completed': self.is_task_successful(),
             'phase_status': self._phase_completion_status.copy(),
             'condition_status': self._last_condition_status.copy(),
-            'grasp_held': self._last_grasp_held,
         }
 
 
@@ -498,80 +492,77 @@ class PhasedSuccessEvaluator:
 # 任务类
 # ============================================================
 
-class BimanualPivotPhone(BimanualTask):
+class BlockedPickFork(BimanualTask):
     """
-    靠墙撬起抓取任务：双臂协作将手机推向墙壁并撬起抓取。
+    按压翘起抓取叉子任务：双臂协作，按压叉子头部使叉柄翘起后抓取。
 
-    策略类型: 2 (WallLever)
+    策略类型: 3 (PressTilt)
 
-    路径点方案:
-    - right_grasper: 右臂抓取（默认）
-      - grasper路径点: waypoint0, 2, 4, 6
-      - pusher路径点: waypoint1, 3, 5, 7, 8
-    - left_grasper: 左臂抓取（镜像）
-      - grasper路径点: waypoint0_a, 2_a, 4_a, 6_a
-      - pusher路径点: waypoint1_a, 3_a, 5_a, 7_a, 8_a
+    Scheme-Based Waypoint设计:
+    - right_grasper scheme: waypoint0-7 (右臂grasper，左臂pusher)
+    - left_grasper scheme: waypoint0_a-7_a (左臂grasper，右臂pusher)
+
+    Waypoint分配 (8个waypoints):
+    - grasper: waypoint0, waypoint2, waypoint4, waypoint6
+    - pusher: waypoint1, waypoint3, waypoint5, waypoint7
     """
 
-    STRATEGY_TYPE = 2  # WallLever策略
+    STRATEGY_TYPE = 3  # PressTilt策略
+    DIRECT_GRASP_SCHEME = 'right_grasper'
 
     def init_task(self) -> None:
         """初始化任务"""
-        # ===== 获取场景对象 =====
-        self.target_object = Shape('Phone')
+        self.target_object = Shape('Fork_phy')
 
         self.grasp_pt = None
         if Object.exists('grasp_pt'):
             self.grasp_pt = Dummy('grasp_pt')
 
-        self.register_graspable_objects([self.target_object])
+        # 直接抓取失败素材不使用 RLBench 的稳定 grasp attach 机制。
+        self.register_graspable_objects([])
 
-        # ===== 保存默认位置（用于位置限制）=====
-        # 场景放置时以此为中心，限制随机化范围
-        self._default_base_position = np.array(self.get_base().get_position())
+        # Scheme-based waypoint sets
+        self.waypoint_sets = {
+            'right_grasper': {
+                'grasper': ['waypoint0', 'waypoint2', 'waypoint4', 'waypoint6'],
+                'pusher': ['waypoint1', 'waypoint3', 'waypoint5', 'waypoint7']
+            },
+            'left_grasper': {
+                'grasper': ['waypoint0_a', 'waypoint2_a', 'waypoint4_a', 'waypoint6_a'],
+                'pusher': ['waypoint1_a', 'waypoint3_a', 'waypoint5_a', 'waypoint7_a']
+            }
+        }
 
-        # ===== 初始化角色选择器 =====
+        # 当前激活的waypoint模式
+        self.active_waypoint_mode = 'right_grasper'
+
         self.role_selector = ArmRoleSelector(
             robot=self.robot,
             right_tip_name="Panda_rightArm_tip",
             left_tip_name="Panda_leftArm_tip",
         )
 
-        # ===== 定义两套路径点方案 =====
-        # BimanualPivotPhone: 9个waypoints (0-8)
-        # grasper: 4个 (0,2,4,6)
-        # pusher: 5个 (1,3,5,7,8) - waypoint8 用于清道撤退
-        self.waypoint_sets = {
-            'right_grasper': {
-                'grasper': ['waypoint0', 'waypoint2', 'waypoint4', 'waypoint6'],
-                'pusher': ['waypoint1', 'waypoint3', 'waypoint5', 'waypoint7', 'waypoint8']
-            },
-            'left_grasper': {
-                'grasper': ['waypoint0_a', 'waypoint2_a', 'waypoint4_a', 'waypoint6_a'],
-                'pusher': ['waypoint1_a', 'waypoint3_a', 'waypoint5_a', 'waypoint7_a', 'waypoint8_a']
-            }
-        }
-
-        self.active_waypoint_mode = 'right_grasper'
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
 
         self.phased_evaluator = None
 
         self.register_success_conditions([
-            LiftedCondition(self.target_object, min_height=0.9)
+            LiftedCondition(self.target_object, min_height=0.85)
         ])
 
     def _get_active_waypoints(self) -> Dict[str, List[str]]:
         """获取当前激活方案的路径点配置"""
-        return self.waypoint_sets[self.active_waypoint_mode]
+        active_wps = self.waypoint_sets[self.active_waypoint_mode]
+        return {'grasper': active_wps['grasper'], 'pusher': []}
 
     def _setup_waypoint_mapping(self):
-        """根据当前激活方案和角色分配设置 waypoint_mapping"""
-        active_wps = self._get_active_waypoints()
+        """设置waypoint到臂的映射"""
         self.waypoint_mapping = defaultdict(lambda: 'right')
+        active_waypoints = self._get_active_waypoints()
+
         for role, arm in self.current_role_assignment.items():
-            for wp in active_wps.get(role, []):
+            for wp in active_waypoints.get(role, []):
                 self.waypoint_mapping[wp] = arm
 
     def _setup_phased_evaluator(self):
@@ -598,31 +589,29 @@ class BimanualPivotPhone(BimanualTask):
             self.phased_evaluator = None
             return
 
-        # 获取抬起阶段的路径点
-        active_wps = self._get_active_waypoints()
+        # 获取当前scheme的lift waypoint
+        active_waypoints = self._get_active_waypoints()
+        lift_waypoint_name = active_waypoints['grasper'][-1]  # waypoint6 或 waypoint6_a
+
         lift_waypoints = []
-        lift_wp_name = active_wps['grasper'][-1]  # waypoint6 或 waypoint6_a
-        if Object.exists(lift_wp_name):
-            lift_waypoints.append(Dummy(lift_wp_name))
+        if Object.exists(lift_waypoint_name):
+            lift_waypoints.append(Dummy(lift_waypoint_name))
 
         # ====== 单独阶段条件定义 ======
         con1 = GraspPointHeightCondition(
             self.grasp_pt, self.target_object,
-            min_height=0.79,
+            min_height=0.75,  # 翘起高度阈值（叉子较小，阈值略低）
             velocity_threshold=0.2, required_stable_frames=3
         )
         con2 = StableGraspCondition(
             grasper_gripper, self.target_object,
             velocity_threshold=0.1, required_stable_frames=3
         )
-        grasp_held_condition = GraspedCondition(
-            grasper_gripper, self.target_object
-        )
         con3 = ClearPathCondition(
             pusher_gripper, self.target_object, pusher_tip,
-            lift_waypoints=lift_waypoints, min_clearance=0.4
+            lift_waypoints=lift_waypoints, min_clearance=0.2
         )
-        con4 = LiftedCondition(self.target_object, min_height=0.9)
+        con4 = LiftedCondition(self.target_object, min_height=0.85)
 
         stage_conditions = {
             1: con1,
@@ -631,58 +620,34 @@ class BimanualPivotPhone(BimanualTask):
             4: con4,
         }
 
-        self.phased_evaluator = PhasedSuccessEvaluator(
-            stage_conditions, grasp_held_condition
-        )
-        logging.info("PhasedSuccessEvaluator initialized successfully for BimanualPivotPhone")
+        self.phased_evaluator = PhasedSuccessEvaluator(stage_conditions)
+        logging.info(f"PhasedSuccessEvaluator initialized for BlockedPickFork (scheme: {self.active_waypoint_mode})")
 
     def init_episode(self, index: int) -> List[str]:
         """初始化episode"""
         self._variation_index = index
         self._step_count = 0
 
-        # 随机选择基础旋转偏移：0 (Pose A) 或 π (Pose B)
-        self._base_rotation_offset = np.random.choice([0, np.pi])
-
-        self.active_waypoint_mode = 'right_grasper'
+        # 重置为默认scheme
+        self.active_waypoint_mode = self.DIRECT_GRASP_SCHEME
         self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
         self._setup_waypoint_mapping()
 
-        return ['Pick up the phone, creating sufficient space for a grasp if direct access is obstructed.']
+        return ['directly attempt the blocked fork grasp without press-tilt pre-manipulation']
 
-    def base_rotation_bounds(self):
-        """
-        限制场景旋转到两个离散区域：
-        - Pose A: 0° ± 20°  (offset=0)
-        - Pose B: 180° ± 20° (offset=π)
+    def post_placement_setup(self) -> None:
+        """固定 direct-grasp 方案，不运行原任务的 pusher reachability selector。"""
+        self.active_waypoint_mode = self.DIRECT_GRASP_SCHEME
+        self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
+        self._setup_waypoint_mapping()
+        self.phased_evaluator = None
 
-        覆盖父类默认的 [-π, +π] 全范围旋转。
+    def variation_count(self) -> int:
+        return 1
 
-        注意：此方法会在 init_episode() 之前被调用（如 task_builder 按 "+" 时），
-        因此在这里自行初始化 _base_rotation_offset 以确保两种配置都能出现。
-        """
-        if not hasattr(self, '_base_rotation_offset'):
-            self._base_rotation_offset = np.random.choice([0, np.pi], p=[1, 0])
-
-        offset = self._base_rotation_offset
-        delta = np.deg2rad(15)  # 15° ≈ 0.262 rad
-        min_rot = (0.0, 0.0, offset - delta)
-        max_rot = (0.0, 0.0, offset + delta)
-
-        return min_rot, max_rot
-
-    def boundary_root(self):
-        """返回场景的边界根对象，用于 SpawnBoundary 放置"""
-        return self.get_base()
-
-    def base_position_bounds(self):
-        """
-        返回位置偏移限制 (delta_x, delta_y)，单位为米。
-        用于在 post_placement_setup() 中限制场景位置随机化范围。
-        """
-        # 推荐值：±0.03m (3cm) 到 ±0.05m (5cm)
-        # 较小的值使场景更接近默认位置，较大的值增加多样性
-        return 0.05, 0.05  # x方向±5cm, y方向±5cm
+    def is_static_workspace(self) -> bool:
+        """Use the copied TTM pose exactly for repeatable failure video capture."""
+        return True
 
     # def step(self) -> None:
     #     """每个仿真步骤都会被调用，用于追踪阶段指标"""
@@ -717,105 +682,32 @@ class BimanualPivotPhone(BimanualTask):
 
     #     print(f"[Step {self._step_count:4d}] phase={phase} eval={eval_ok} | grasp_pt_z={grasp_pt_z:.3f} target_z={target_pos[2]:.3f} | dist_to_target={dist_to_target:.3f} | dist_to_wp={wp_str}")
 
-    def post_placement_setup(self) -> None:
-        """在场景随机放置后选择方案并设置评估器"""
-        # 位置限制：将场景位置钳制到默认位置附近
-        self._clamp_position_to_bounds()
-
-        # 根据可行性和成本选择最优方案
-        self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
-            self.waypoint_sets,
-            critical_pusher_indices=[0]  # 检查第一个 pusher 路径点
-        )
-        if role_assignment != self.current_role_assignment:
-            self.current_role_assignment = role_assignment
-            self._setup_waypoint_mapping()
-            logging.info(f"Scheme selected: {self.active_waypoint_mode}, "
-                        f"roles: {self.current_role_assignment}")
-
-        # ===== [临时] 仅收集 left_grasper 方案，否则跳过 =====
-        # 恢复正常收集：注释掉下面2行
-        # from rlbench.backend.exceptions import DemoError
-        # if self.active_waypoint_mode != 'right_grasper':
-        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want right_grasper", self)
-
-        self._setup_phased_evaluator()
-        if self.phased_evaluator:
-            self.phased_evaluator.reset()
-
-    def _clamp_position_to_bounds(self) -> None:
-        """
-        将场景位置钳制到默认位置的指定邻域内。
-        在 _place_task() 随机放置后调用，确保位置不会偏离太远。
-
-        注意：仅在 _base_rotation_offset == 0 (Pose A) 时生效。
-        """
-        # 仅对 Pose A (offset=0) 生效，Pose B (offset=π) 不限制位置
-        if getattr(self, '_base_rotation_offset', 0) != 0:
-            return
-
-        if not hasattr(self, '_default_base_position'):
-            logging.warning("_default_base_position not set, skipping position clamp")
-            return
-
-        delta_x, delta_y = self.base_position_bounds()
-        base = self.get_base()
-        current_pos = np.array(base.get_position())
-        default_pos = self._default_base_position
-
-        # 计算钳制后的位置
-        clamped_x = np.clip(current_pos[0],
-                            default_pos[0] - delta_x,
-                            default_pos[0] + delta_x)
-        clamped_y = np.clip(current_pos[1],
-                            default_pos[1] - delta_y,
-                            default_pos[1] + delta_y)
-
-        # 只在 x 或 y 超出范围时才调整
-        if current_pos[0] != clamped_x or current_pos[1] != clamped_y:
-            new_pos = [clamped_x, clamped_y, current_pos[2]]
-            base.set_position(new_pos)
-            logging.info(f"Position clamped: ({current_pos[0]:.4f}, {current_pos[1]:.4f}) "
-                        f"-> ({clamped_x:.4f}, {clamped_y:.4f})")
-
-    def variation_count(self) -> int:
-        return 1
-
     @property
     def execution_phases(self):
         """动态生成四阶段执行计划，使用当前激活方案的路径点"""
         active_wps = self._get_active_waypoints()
-        pusher_arm = self.current_role_assignment['pusher']
         grasper_arm = self.current_role_assignment['grasper']
 
-        pusher_wps = active_wps['pusher']   # 5个路径点
         grasper_wps = active_wps['grasper'] # 4个路径点
 
         return [
-            # Phase 1: 推向墙壁并撬动 (4个pusher路径点)
-            {'arm': pusher_arm, 'waypoints': pusher_wps[:4], 'wait_after': 0.5},
-            # Phase 2: 抓取翘起部分 (3个grasper路径点)
-            {'arm': grasper_arm, 'waypoints': grasper_wps[:3], 'wait_after': 1},
-            # Phase 3: 辅助臂清道撤退 (1个pusher路径点)
-            {'arm': pusher_arm, 'waypoints': [pusher_wps[4]], 'wait_after': 0.5},
-            # Phase 4: 抬起物体 (1个grasper路径点)
-            {'arm': grasper_arm, 'waypoints': [grasper_wps[3]], 'wait_after': 0.5},
+            # Direct grasp attempt without press-tilt pre-manipulation.
+            {'arm': grasper_arm, 'waypoints': grasper_wps[:3], 'wait_after': 0.8},
+            # Lift attempt should fail because the fork handle was never raised.
+            {'arm': grasper_arm, 'waypoints': [grasper_wps[3]], 'wait_after': 1.0},
         ]
 
     # ========== 策略和阶段标签接口（scene.py调用）==========
 
     def get_strategy_type(self) -> int:
-        """返回策略类型"""
         return self.STRATEGY_TYPE
 
     def get_current_phase(self) -> int:
-        """返回当前执行阶段"""
         if self.phased_evaluator is None:
             return 1
         return self.phased_evaluator.get_current_phase()
 
     def evaluate_phase_and_get_labels(self) -> Tuple[int, int]:
-        """评估当前状态并返回策略类型和阶段类型标签"""
         strategy_type = self.STRATEGY_TYPE
 
         if self.phased_evaluator is None:
@@ -827,20 +719,17 @@ class BimanualPivotPhone(BimanualTask):
         return strategy_type, phase_type
 
     def get_phase_progress(self) -> Dict:
-        """获取阶段进度信息"""
         if self.phased_evaluator is None:
             return {'current_phase': 1, 'current_phase_name': PHASE_NAMES[1],
                     'max_current_phase_reached': 1, 'max_completed_phase': 0,
                     'total_phases': 4, 'completed': False,
                     'phase_status': {1: False, 2: False, 3: False, 4: False},
-                    'condition_status': {1: False, 2: False, 3: False, 4: False},
-                    'grasp_held': False}
+                    'condition_status': {1: False, 2: False, 3: False, 4: False}}
         return self.phased_evaluator.get_phase_progress()
 
     def get_role_assignment(self) -> Dict[str, str]:
-        """返回当前的角色分配"""
         return self.current_role_assignment.copy()
 
     def get_active_scheme(self) -> str:
-        """返回当前激活的路径点方案"""
+        """返回当前激活的waypoint scheme名称"""
         return self.active_waypoint_mode

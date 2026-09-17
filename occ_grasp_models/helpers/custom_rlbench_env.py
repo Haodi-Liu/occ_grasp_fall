@@ -10,6 +10,7 @@ from rlbench.backend.observation import (
     UnimanualObservation,
 )
 from rlbench.backend.task import Task
+from rlbench.backend.scene import DEMO_LAYOUT_TASKS
 from yarr.agents.agent import ActResult, VideoSummary, TextSummary
 from yarr.envs.rlbench_env import RLBenchEnv, MultiTaskRLBenchEnv
 from yarr.utils.observation_type import ObservationElement
@@ -193,6 +194,29 @@ class CustomRLBenchEnv(RLBenchEnv):
         self._aux_eval_step = 0
         self._aux_eval_sample_count = 0
         self._aux_eval_phase_counts = None
+        self._oracle_phase_change_count = 0
+        self._oracle_phase_last_from = 0
+        self._oracle_phase_last_to = 0
+
+    def _reset_oracle_phase_state(self):
+        self._oracle_phase_change_count = 0
+        self._oracle_phase_last_from = 0
+        self._oracle_phase_last_to = 0
+
+    def _get_oracle_phase_state(self):
+        task = self._task._task if self._task is not None else None
+        evaluator = getattr(task, "phased_evaluator", None)
+        if evaluator is None:
+            return None
+        return np.asarray(
+            [
+                evaluator.get_current_phase(),
+                self._oracle_phase_change_count,
+                self._oracle_phase_last_from,
+                self._oracle_phase_last_to,
+            ],
+            dtype=np.int64,
+        )
 
     @property
     def observation_elements(self) -> List[ObservationElement]:
@@ -356,6 +380,9 @@ class CustomRLBenchEnv(RLBenchEnv):
         obs_dict['right_gripper_open'] = np.array([obs.right.gripper_open])
         obs_dict = self._append_aux_gt(obs, obs_dict)
         obs_dict['task_id'] = np.int32(max(self.active_task_id, 0))
+        oracle_phase_state = self._get_oracle_phase_state()
+        if oracle_phase_state is not None:
+            obs_dict['oracle_phase_state'] = oracle_phase_state
         return obs_dict
 
     def extract_obs_unimanual(self, obs: UnimanualObservation, t=None, prev_action=None):
@@ -412,6 +439,11 @@ class CustomRLBenchEnv(RLBenchEnv):
         self._current_episode_number = -1
         _clear_gt_arm_scheme_state(self)
         self._previous_obs_dict = super(CustomRLBenchEnv, self).reset()
+        # Callbacks may run during super().reset(); establish the episode baseline now.
+        self._reset_oracle_phase_state()
+        oracle_phase_state = self._get_oracle_phase_state()
+        if oracle_phase_state is not None:
+            self._previous_obs_dict['oracle_phase_state'] = oracle_phase_state
         self._record_current_episode = (
             self.eval and self._episode_index % self._record_every_n == 0
         )
@@ -428,8 +460,16 @@ class CustomRLBenchEnv(RLBenchEnv):
 
     def _update_phase_evaluation(self) -> Tuple[bool, int]:
         task = self._task._task if self._task is not None else None
-        if task is not None and hasattr(task, 'phased_evaluator') and task.phased_evaluator is not None:
-            return task.phased_evaluator.evaluate_current_phase()
+        evaluator = getattr(task, 'phased_evaluator', None)
+        if evaluator is not None:
+            old_phase = int(evaluator.get_current_phase())
+            result = evaluator.evaluate_current_phase()
+            new_phase = int(evaluator.get_current_phase())
+            if new_phase != old_phase:
+                self._oracle_phase_change_count += 1
+                self._oracle_phase_last_from = old_phase
+                self._oracle_phase_last_to = new_phase
+            return result
         return False, 0
 
     def _my_callback(self):
@@ -602,26 +642,30 @@ class CustomRLBenchEnv(RLBenchEnv):
     def _collect_overlay_points_3d(self) -> Dict[str, np.ndarray]:
         return _collect_env_overlay_points_3d()
 
-    def get_env_overlay_state(self) -> Dict:
+    def get_env_overlay_state(self, include_phase: bool = True) -> Dict:
         """
-        获取 cinematic recorder 所需的环境真实状态。
+        获取 cinematic recorder 所需的当前状态。
 
-        该接口只读取任务真实状态和 CoppeliaSim dummy，不读取模型预测信息。
+        阶段和标记点来自环境；子任务来自当前 action chunk 的
+        oracle selector 决策。
         """
         task = self._task._task if self._task is not None else None
         if task is None:
             return {}
 
         phase_progress = None
-        if hasattr(task, 'get_phase_progress'):
+        if include_phase and hasattr(task, 'get_phase_progress'):
             phase_progress = task.get_phase_progress()
 
         strategy_type = getattr(task, 'STRATEGY_TYPE', 1)
         gt_arm_scheme, gt_arm_roles = _get_gt_arm_overlay_state(self, task)
+        pred_info = self._last_pred_info if isinstance(self._last_pred_info, dict) else {}
         return {
             'strategy_type': strategy_type,
             'strategy_name': STRATEGY_NAMES.get(strategy_type, "Unknown"),
             'phase_progress': phase_progress,
+            'active_subtask_type': pred_info.get('type'),
+            'active_subtask_prompt': pred_info.get('prompt'),
             'gt_arm_scheme': gt_arm_scheme,
             'gt_arm_roles': gt_arm_roles,
             'points_3d': self._collect_overlay_points_3d(),
@@ -682,9 +726,12 @@ class CustomRLBenchEnv(RLBenchEnv):
                     time.sleep(0.5)  # Brief pause to let CoppeliaSim stabilize
                     self._task._scene.reset()
 
-                _, obs = self._task.reset_to_demo(d)
+                descriptions, obs = self._task.reset_to_demo(
+                    d, restore_scene=self._task.get_name() in DEMO_LAYOUT_TASKS)
 
-                self._lang_goal = self._task.get_task_descriptions()[0]
+                self._lang_goal = descriptions[0]
+                # Discard reset/retry callbacks and start from the final initial state.
+                self._reset_oracle_phase_state()
                 self._previous_obs_dict = self.extract_obs(obs)
                 break  # Success, exit loop
 
@@ -1119,14 +1166,14 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
     def _collect_overlay_points_3d(self) -> Dict[str, np.ndarray]:
         return _collect_env_overlay_points_3d()
 
-    def get_env_overlay_state(self) -> Dict:
+    def get_env_overlay_state(self, include_phase: bool = True) -> Dict:
         """获取 cinematic recorder 所需的环境真实状态。"""
         task = self._task._task if self._task is not None else None
         if task is None:
             return {}
 
         phase_progress = None
-        if hasattr(task, 'get_phase_progress'):
+        if include_phase and hasattr(task, 'get_phase_progress'):
             phase_progress = task.get_phase_progress()
 
         strategy_type = getattr(task, 'STRATEGY_TYPE', 1)
@@ -1184,8 +1231,9 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         )[0]
 
         self._task.set_variation(d.variation_number)
-        _, obs = self._task.reset_to_demo(d)
-        self._lang_goal = self._task.get_task_descriptions()[0]
+        descriptions, obs = self._task.reset_to_demo(
+            d, restore_scene=self._task.get_name() in DEMO_LAYOUT_TASKS)
+        self._lang_goal = descriptions[0]
 
         self._previous_obs_dict = self.extract_obs(obs)
         self._record_current_episode = (

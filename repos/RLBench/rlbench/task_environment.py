@@ -210,8 +210,15 @@ class TaskEnvironment(object):
                     'Could not collect demos. Maybe a problem with the task?')
         return demos
 
-    def reset_to_demo(self, demo: Demo) -> (List[str], Observation):
+    def reset_to_demo(self, demo: Demo,
+                      restore_scene: bool = False) -> (List[str], Observation):
+        self._reset_called = False
         demo.restore_state()
+        if restore_scene:
+            self.set_variation(int(demo.variation_number))
+            descriptions = self._scene.init_episode_from_demo(demo)
+            self._reset_called = True
+            return descriptions, self._scene.get_observation()
         # do not set variation as suggested in commit 6e79c5bac. This version
         # of RLBench already stores the variation index
         #variation_index = demo._observations[0].misc["variation_index"]

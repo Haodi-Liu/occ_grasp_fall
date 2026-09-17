@@ -1,5 +1,6 @@
 import importlib
 import pickle
+from copy import deepcopy
 
 from itertools import product            
 import os
@@ -96,6 +97,15 @@ def get_stored_demos(amount: int, image_paths: bool, dataset_root: str,
         example_path = join(examples_path, example)
         with open(join(example_path, LOW_DIM_PICKLE), 'rb') as f:
             obs = pickle.load(f)
+
+        # Keep reset data separate from the observations filtered for the agent.
+        obs.initial_observation = deepcopy(obs[0])
+        obs.initial_arm_scheme = None
+        scheme_files = [name for name in listdir(example_path)
+                        if name.startswith('scheme_info_') and name.endswith('.pkl')]
+        if len(scheme_files) == 1:
+            with open(join(example_path, scheme_files[0]), 'rb') as f:
+                obs.initial_arm_scheme = pickle.load(f)
 
         if variation_number == -1:
             with open(join(example_path, VARIATION_NUMBER), 'rb') as f:

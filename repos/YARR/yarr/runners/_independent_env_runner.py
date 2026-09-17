@@ -212,6 +212,7 @@ class _IndependentEnvRunner(_EnvRunner):
 
         env = self._eval_env
         env.eval = eval
+        rec_cfg = cinematic_recorder_cfg
         env.launch()
 
         # C1 数据采集器（关闭时保持旧行为）
@@ -221,7 +222,7 @@ class _IndependentEnvRunner(_EnvRunner):
 
         # ===== 新增：初始化 scheme 分层评估所需的数据 =====
         # 获取 dataset_root（评估数据目录，不带 .train 后缀）
-        # 示例: '/mnt/rlbench_data'
+        # 示例: '/mnt/occ_data'
         # 注意: _dataset_root 存储在 env._rlbench_env 中，而非 env 本身
         if hasattr(env, '_rlbench_env') and hasattr(env._rlbench_env, '_dataset_root'):
             dataset_root = env._rlbench_env._dataset_root
@@ -251,7 +252,6 @@ class _IndependentEnvRunner(_EnvRunner):
         # ===================================================
 
         # initialize cinematic recorder if specified
-        rec_cfg = cinematic_recorder_cfg
         if rec_cfg.enabled:
             cam_placeholder = Dummy('cam_cinematic_placeholder')
             cam = VisionSensor.create(rec_cfg.camera_resolution)
@@ -353,6 +353,7 @@ class _IndependentEnvRunner(_EnvRunner):
                 collector_task_name = ""
                 episode_success = False
                 episode_aborted = True
+                shutdown_after_finalize = False
 
                 # ===== MODIFICATION: Episode-level exception handling =====
                 try:
@@ -385,9 +386,7 @@ class _IndependentEnvRunner(_EnvRunner):
 
                         while True:
                             if self._kill_signal.value:
-                                if collector is not None:
-                                    collector.close()
-                                env.shutdown()
+                                shutdown_after_finalize = True
                                 return
                             if (eval or self._target_replay_ratio is None or
                                     self._step_signal.value <= 0 or (
@@ -477,31 +476,36 @@ class _IndependentEnvRunner(_EnvRunner):
                                 should_save = False
                                 if success and success_videos_saved < max_success_videos:
                                     should_save = True
-                                    success_videos_saved += 1
-                                    logging.info(f"Recording success video {success_videos_saved}/{max_success_videos}")
                                 elif not success and fail_videos_saved < max_fail_videos:
                                     should_save = True
-                                    fail_videos_saved += 1
-                                    logging.info(f"Recording fail video {fail_videos_saved}/{max_fail_videos}")
 
                                 if should_save:
                                     # Save video to disk
                                     # 按 checkpoint 分目录存储: {save_path}/videos/{weight_name}/{task_name}_s{seed}_{succ/fail}.mp4
-                                    video_dir = os.path.join(rec_cfg.save_path, 'videos', weight_name)
-                                    os.makedirs(video_dir, exist_ok=True)
-                                    record_file = os.path.join(video_dir,
-                                                               '%s_s%s_%s.mp4' % (task_name,
-                                                                                      eval_demo_seed,
-                                                                                      'succ' if success else 'fail'))
+                                    record_file = os.path.join(
+                                        rec_cfg.save_path, 'videos', weight_name,
+                                        '%s_s%s_%s.mp4' % (
+                                            task_name, eval_demo_seed,
+                                            'succ' if success else 'fail',
+                                        ),
+                                    )
+                                    os.makedirs(os.path.dirname(record_file), exist_ok=True)
                                     lang_goal = self._eval_env._lang_goal
                                     tr.save(record_file, lang_goal, reward)
+                                    if success:
+                                        success_videos_saved += 1
+                                        logging.info(
+                                            f"Recorded success video {success_videos_saved}/{max_success_videos}"
+                                        )
+                                    else:
+                                        fail_videos_saved += 1
+                                        logging.info(
+                                            f"Recorded fail video {fail_videos_saved}/{max_fail_videos}"
+                                        )
                                     logging.info(f"✓ Saved video: {record_file}")
                                 else:
-                                    # Don't save, just clear memory
-                                    tr.clear_current_snaps()
+                                    # The finally block clears unsaved frames.
                                     logging.info(f"✗ Skipped video for episode {ep} ({'success' if success else 'fail'}), quota reached")
-
-                                tr._cam_motion.restore_pose()
 
                             # Episode completed successfully
                             success_count += 1
@@ -534,6 +538,12 @@ class _IndependentEnvRunner(_EnvRunner):
                             episode_rollout.clear()
                             # Continue to next episode
                             continue
+
+                    else:
+                        failed_count += 1
+                        failed_episodes.append(
+                            (ep, eval_demo_seed, "Rollout produced no transitions")
+                        )
 
                 except StopIteration:
                     if not scheme_total_counted and SCHEME_UTILS_AVAILABLE:
@@ -592,8 +602,15 @@ class _IndependentEnvRunner(_EnvRunner):
                     continue
                 # =============================================================
                 finally:
+                    if rec_cfg.enabled:
+                        tr.clear_current_snaps()
+                        tr._cam_motion.restore_pose()
                     if collector is not None and collector_started:
                         collector.end_episode(success=episode_success, aborted=episode_aborted)
+                    if shutdown_after_finalize:
+                        if collector is not None:
+                            collector.close()
+                        env.shutdown()
 
             # ===== MODIFICATION: Print failed episodes summary =====
             if failed_episodes:

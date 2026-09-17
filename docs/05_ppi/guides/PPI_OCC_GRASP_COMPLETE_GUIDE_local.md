@@ -16,8 +16,8 @@
 ## 目标链路
 
 ```
-/mnt/rlbench_data/*.train (训练数据)
-/mnt/rlbench_data/*.test (测试数据)
+/mnt/occ_data/<task>.train (训练数据)
+/mnt/occ_data/<task>       (评测数据，无 .test 后缀)
   → 预处理（point cloud + dino + point flow + norm stats）
   → PPI 训练（train_ppi_ddp.py）
   → RLBench 仿真评估（eval_ppi.py）
@@ -33,8 +33,8 @@
 2. **预处理脚本位置**：`occ_grasp_models/scripts/ppi/data_generation/`
 3. **工作目录**：始终在 `/home/hdliu/occ_grasp_fall/occ_grasp_models` 下执行
 4. **数据组织**：
-   - 训练需要：原始训练 demo（`/mnt/rlbench_data/*.train`）+ 预处理产物（point_cloud/dino/point_flow/norm_stats）
-   - 评估需要：原始测试 demo（`/mnt/rlbench_data/*.test`）+ 语言嵌入 + 训练权重（评估时在线重建视觉特征）
+   - 训练需要：原始训练 demo（`/mnt/occ_data/<task>.train`）+ 预处理产物（point_cloud/dino/point_flow/norm_stats）
+   - 评估需要：原始评测 demo（`/mnt/occ_data/<task>`，无 `.test` 后缀）+ 语言嵌入 + 训练权重（评估时在线重建视觉特征）
 5. **目录适配**：训练和测试数据需通过软链接映射为无后缀目录
 6. **验证集来源**：从 `.train` 内部按 `val_ratio` 划分，不自动使用 `.val` 目录
 7. **本指南默认工作方式**：直接手动修改配置文件/脚本，再执行对应命令；不再依赖一组临时 `export` 环境变量
@@ -47,15 +47,15 @@
 
 | 任务目录 | 简称 | 训练数据 | 测试数据 |
 |---------|------|---------|---------|
-| `bimanual_edge_phone` | `edge_phone` | 150 episodes (`/mnt/rlbench_data/*.train`) | 30 episodes (`/mnt/rlbench_data/*.test`) |
-| `bimanual_pivot_phone` | `pivot_phone` | 150 episodes (`/mnt/rlbench_data/*.train`) | 30 episodes (`/mnt/rlbench_data/*.test`) |
-| `bimanual_pick_plate` | `pick_plate` | 150 episodes (`/mnt/rlbench_data/*.train`) | 30 episodes (`/mnt/rlbench_data/*.test`) |
-| `bimanual_pick_fork` | `pick_fork` | 150 episodes (`/mnt/rlbench_data/*.train`) | 30 episodes (`/mnt/rlbench_data/*.test`) |
+| `bimanual_edge_phone` | `edge_phone` | 150 episodes (`/mnt/occ_data/bimanual_edge_phone.train`) | 30 episodes (`/mnt/occ_data/bimanual_edge_phone`) |
+| `bimanual_pivot_phone` | `pivot_phone` | 150 episodes (`/mnt/occ_data/bimanual_pivot_phone.train`) | 30 episodes (`/mnt/occ_data/bimanual_pivot_phone`) |
+| `bimanual_pick_plate` | `pick_plate` | 150 episodes (`/mnt/occ_data/bimanual_pick_plate.train`) | 30 episodes (`/mnt/occ_data/bimanual_pick_plate`) |
+| `bimanual_pick_fork` | `pick_fork` | 150 episodes (`/mnt/occ_data/bimanual_pick_fork.train`) | 30 episodes (`/mnt/occ_data/bimanual_pick_fork`) |
 
 **说明**：
-- 训练数据位于：`/mnt/rlbench_data/<task>.train/all_variations/episodes`
-- 测试数据位于：`/mnt/rlbench_data/<task>.test/all_variations/episodes`
-- 验证集（`/mnt/rlbench_data/<task>.val`，50 episodes）暂不使用，训练时从训练集按 `val_ratio=0.2` 划分
+- 训练数据位于：`/mnt/occ_data/<task>.train/all_variations/episodes`
+- 评测数据位于：`/mnt/occ_data/<task>/all_variations/episodes`
+- `/mnt/occ_data` 当前不单独提供 `<task>.val` 目录；训练时从 `.train` 内部按 `val_ratio=0.2` 划分验证集
 
 ### 1.2 命名约定
 
@@ -193,14 +193,28 @@ mkdir -p data/training_processed/norm_stats
 ### 3.2 建立软链接
 
 ```bash
+data_root=/mnt/occ_data
+
 for task in \
   bimanual_edge_phone \
   bimanual_pivot_phone \
   bimanual_pick_plate \
   bimanual_pick_fork
 do
-  ln -sfn "/mnt/rlbench_data/${task}.train" "data/training_raw/${task}"
-  ln -sfn "/mnt/rlbench_data/${task}.test"  "data/eval_raw/${task}"
+  train_source="${data_root}/${task}.train"
+  eval_source="${data_root}/${task}"
+
+  test -d "${train_source}/all_variations/episodes" || {
+    echo "missing training data: ${train_source}" >&2
+    exit 1
+  }
+  test -d "${eval_source}/all_variations/episodes" || {
+    echo "missing eval data: ${eval_source}" >&2
+    exit 1
+  }
+
+  ln -sfn "${train_source}" "data/training_raw/${task}"
+  ln -sfn "${eval_source}"  "data/eval_raw/${task}"
 done
 ```
 
@@ -221,7 +235,7 @@ readlink -f "data/eval_raw/bimanual_edge_phone"
 
 先给结论：
 
-- 如果你按本文当前配置走**完整 PPI**（`prediction_type=keyframe_continuous` + `policy.predict_point_flow=true`），那么**训练源 `/mnt/rlbench_data/*.train` 中缺少 `object_6d_pose` 会是实打实的问题**，不能忽略。
+- 如果你按本文当前配置走**完整 PPI**（`prediction_type=keyframe_continuous` + `policy.predict_point_flow=true`），那么**训练源 `/mnt/occ_data/*.train` 中缺少 `object_6d_pose` 会是实打实的问题**，不能忽略。
 - 如果你明确改成**无 point flow 的消融/基线**，这个问题可以绕开；但那已经不是本文档这条“完整 PPI”流程。
 
 #### 为什么这是硬阻塞
@@ -237,7 +251,7 @@ readlink -f "data/eval_raw/bimanual_edge_phone"
 
 我已实际核验当前数据与代码：
 
-- `/mnt/rlbench_data/bimanual_edge_phone.train/.../low_dim_obs.pkl` 等四个新任务 demo 中，`BimanualObservation` **没有** `object_6d_pose`
+- `/mnt/occ_data/bimanual_edge_phone.train/.../low_dim_obs.pkl` 等四个新任务 demo 中，`BimanualObservation` **没有** `object_6d_pose`
 - 直接调用 `GetDataKeyframeContinuous.process_episodes(0, 0, [], 10)` 会报：
 
 ```python
@@ -335,13 +349,13 @@ observation_data.update({
 
 #### 第 3 步：重新采集原始 demo，不要混用旧数据
 
-补上 `object_6d_pose` 之后，必须重新生成原始 `.train/.val/.test` demo。
+补上 `object_6d_pose` 之后，必须重新生成受影响的原始 demo。按当前 `/mnt/occ_data` 命名，训练集是 `<task>.train`，评测集是无后缀 `<task>`。
 
 注意：
 
 - **不要**把“旧版无 `object_6d_pose` 的 episode”和“新版有 `object_6d_pose` 的 episode”混在同一个任务目录里
-- 最稳妥的做法是先输出到新的根目录，例如 `/mnt/rlbench_data_pose`，内部继续保留 `<task>.train / <task>.val / <task>.test` 目录命名
-- 验证完成后，再决定是整体替换 `/mnt/rlbench_data` 下对应任务目录，还是把本指南里的软链接改到新的 pose 根目录
+- 最稳妥的做法是先输出到新的根目录，例如 `/mnt/occ_data_pose`，内部保留与当前 `/mnt/occ_data` 一致的命名：训练集为 `<task>.train`，评测集为无后缀 `<task>`
+- 验证完成后，再决定是整体替换 `/mnt/occ_data` 下对应任务目录，还是把本指南里的软链接改到新的 pose 根目录
 
 如果你还要求和原始训练/测试场景配置严格一致，那么请沿用你自己的可复现采集设置（同样的 `PYTHONHASHSEED`、相同的 train/test seed 约定）。
 
@@ -352,7 +366,7 @@ observation_data.update({
 ```bash
 conda run --no-capture-output -n ppi python - <<'PY'
 import pickle
-path = "/mnt/rlbench_data/bimanual_edge_phone.train/all_variations/episodes/episode0/low_dim_obs.pkl"
+path = "/mnt/occ_data/bimanual_edge_phone.train/all_variations/episodes/episode0/low_dim_obs.pkl"
 with open(path, "rb") as f:
     demo = pickle.load(f)
 pose = demo[0].object_6d_pose
@@ -646,7 +660,7 @@ T_OFFSET_INV_EDGE_PHONE = np.array([
     [ 0.000000000000000,  0.000000000000000,  0.000000000000000,  1.000000000000000],
 ], dtype=np.float64)
 
-path = "/mnt/rlbench_data/bimanual_edge_phone.train/all_variations/episodes/episode0/low_dim_obs.pkl"
+path = "/mnt/occ_data/bimanual_edge_phone.train/all_variations/episodes/episode0/low_dim_obs.pkl"
 with open(path, "rb") as f:
     demo = pickle.load(f)
 
@@ -696,6 +710,12 @@ PY
 
 输出路径：`data/training_processed/instruction_embeddings.pkl`
 
+当前原始数据根目录是 `/mnt/occ_data`：
+
+- 训练指令来自 `/mnt/occ_data/<task>.train/all_variations/episodes/episode*/variation_descriptions.pkl`
+- 评测指令来自 `/mnt/occ_data/<task>/all_variations/episodes/episode*/variation_descriptions.pkl`
+- 评测目录是无后缀 `<task>`，不要再扫描已不存在的 `<task>.test`
+
 ```bash
 python - <<'PY'
 import glob
@@ -705,34 +725,47 @@ import torch
 
 from helpers.clip.core.clip import build_model, load_clip, tokenize
 
-data_root = "/mnt/rlbench_data"
+data_root = "/mnt/occ_data"
+task_names = (
+    "bimanual_edge_phone",
+    "bimanual_pivot_phone",
+    "bimanual_pick_plate",
+    "bimanual_pick_fork",
+)
 instructions = set()
+description_file_count = 0
 
-# 从训练数据收集指令
-for task_dir in sorted(glob.glob(os.path.join(data_root, "*.train"))):
+# 同时收集 <task>.train 训练指令和无后缀 <task> 评测指令。
+source_dirs = []
+for task_name in task_names:
+    source_dirs.extend(
+        (
+            os.path.join(data_root, f"{task_name}.train"),
+            os.path.join(data_root, task_name),
+        )
+    )
+
+for task_dir in source_dirs:
     episodes_root = os.path.join(task_dir, "all_variations", "episodes")
+    if not os.path.isdir(episodes_root):
+        raise FileNotFoundError(f"missing episodes directory: {episodes_root}")
     for episode_dir in sorted(glob.glob(os.path.join(episodes_root, "episode*"))):
         path = os.path.join(episode_dir, "variation_descriptions.pkl")
         if not os.path.exists(path):
-            continue
+            raise FileNotFoundError(path)
         with open(path, "rb") as f:
             descriptions = pickle.load(f)
+        description_file_count += 1
         for text in descriptions:
             instructions.add(text)
 
-# 从测试数据收集指令
-for task_dir in sorted(glob.glob(os.path.join(data_root, "*.test"))):
-    episodes_root = os.path.join(task_dir, "all_variations", "episodes")
-    for episode_dir in sorted(glob.glob(os.path.join(episodes_root, "episode*"))):
-        path = os.path.join(episode_dir, "variation_descriptions.pkl")
-        if not os.path.exists(path):
-            continue
-        with open(path, "rb") as f:
-            descriptions = pickle.load(f)
-        for text in descriptions:
-            instructions.add(text)
+if not instructions:
+    raise RuntimeError("no instructions found")
 
-print(f"found {len(instructions)} unique instructions")
+print(
+    f"loaded {description_file_count} description files; "
+    f"found {len(instructions)} unique instructions"
+)
 
 model, _ = load_clip("RN50", jit=False, device="cpu")
 clip_model = build_model(model.state_dict()).to("cpu").eval()
@@ -751,6 +784,22 @@ with open(out_path, "wb") as f:
     pickle.dump(embedding_dict, f)
 
 print(f"saved to {out_path}")
+PY
+```
+
+生成后验收：
+
+```bash
+python - <<'PY'
+import os
+import pickle
+
+path = "data/training_processed/instruction_embeddings.pkl"
+with open(path, "rb") as f:
+    embeddings = pickle.load(f)
+
+assert embeddings, "instruction embedding dictionary is empty"
+print(f"{path}: {len(embeddings)} instructions, {os.path.getsize(path)} bytes")
 PY
 ```
 
@@ -1179,7 +1228,7 @@ exp_logs/ckpt/bimanual_edge_phone/train_ppi_ddp_edge_phone_ppi_<ADDITION_INFO>_s
 这一节只讨论**本地机器上的仿真评测**。训练已经在别的远程机器完成，本地只负责：
 
 1. 读取 `exp_logs/ckpt` 下已有训练结果
-2. 读取 `/mnt/rlbench_data/<task>.test`
+2. 读取 `/mnt/occ_data/<task>`（当前评测目录无 `.test` 后缀）
 3. 手动建立评测所需软链接
 4. 运行 `scripts/ppi/inference/evaluate_ppi_<task>.sh`
 
@@ -1235,7 +1284,16 @@ test -f ../repos/GroundingDINO/groundingdino/config/GroundingDINO_SwinB_cfg.py &
 再确认测试集目录：
 
 ```bash
-find /mnt/rlbench_data -maxdepth 2 -type d | rg 'bimanual_edge_phone|bimanual_pivot_phone|bimanual_pick_plate|bimanual_pick_fork'
+for task in \
+  bimanual_edge_phone \
+  bimanual_pivot_phone \
+  bimanual_pick_plate \
+  bimanual_pick_fork
+do
+  test -d "/mnt/occ_data/${task}/all_variations/episodes" \
+    && echo "ok: /mnt/occ_data/${task}" \
+    || echo "missing: /mnt/occ_data/${task}"
+done
 ```
 
 ### 8.2 当前本地可直接评测的四个训练输出
@@ -1265,10 +1323,10 @@ done
 ```bash
 mkdir -p data/eval_raw
 
-ln -sfn /mnt/rlbench_data/bimanual_edge_phone.test  data/eval_raw/bimanual_edge_phone
-ln -sfn /mnt/rlbench_data/bimanual_pivot_phone.test data/eval_raw/bimanual_pivot_phone
-ln -sfn /mnt/rlbench_data/bimanual_pick_plate.test  data/eval_raw/bimanual_pick_plate
-ln -sfn /mnt/rlbench_data/bimanual_pick_fork.test   data/eval_raw/bimanual_pick_fork
+ln -sfn /mnt/occ_data/bimanual_edge_phone  data/eval_raw/bimanual_edge_phone
+ln -sfn /mnt/occ_data/bimanual_pivot_phone data/eval_raw/bimanual_pivot_phone
+ln -sfn /mnt/occ_data/bimanual_pick_plate  data/eval_raw/bimanual_pick_plate
+ln -sfn /mnt/occ_data/bimanual_pick_fork   data/eval_raw/bimanual_pick_fork
 ```
 
 校验命令：
@@ -1278,6 +1336,17 @@ readlink -f data/eval_raw/bimanual_edge_phone
 readlink -f data/eval_raw/bimanual_pivot_phone
 readlink -f data/eval_raw/bimanual_pick_plate
 readlink -f data/eval_raw/bimanual_pick_fork
+
+for task in \
+  bimanual_edge_phone \
+  bimanual_pivot_phone \
+  bimanual_pick_plate \
+  bimanual_pick_fork
+do
+  test -d "data/eval_raw/${task}/all_variations/episodes" \
+    && echo "ok: ${task}" \
+    || { echo "broken eval link: ${task}" >&2; exit 1; }
+done
 ```
 
 ### 8.4 手动建立 `eval_weights` 软链接
@@ -1615,7 +1684,7 @@ export DISPLAY=:0
 
 然后按第 8 节手动建立：
 
-1. `data/eval_raw/<TASK_DIR> -> /mnt/rlbench_data/<TASK_DIR>.test`
+1. `data/eval_raw/<TASK_DIR> -> /mnt/occ_data/<TASK_DIR>`（评测源目录无 `.test` 后缀）
 2. `eval_weights/<TASK_DIR>/0/<RUN_NAME> -> exp_logs/ckpt/<TASK_DIR>/<RUN_NAME>`
 
 完成后直接运行：
@@ -1681,8 +1750,8 @@ eval_videos/<TASK_DIR>/<RUN_NAME>/videos/0/
 
 ### 9.7 评测部分的关键说明
 
-1. `.test` 数据不需要提前生成 `point_cloud / dino / point_flow / norm_stats`；评测时在线重建视觉特征
-2. 评测时真正必须存在的是：`.test` 数据、`instruction_embeddings.pkl`、预训练视觉权重、训练好的 `ckpt`
+1. `/mnt/occ_data/<task>` 评测数据不需要提前生成 `point_cloud / dino / point_flow / norm_stats`；评测时在线重建视觉特征
+2. 评测时真正必须存在的是：原始评测数据、`instruction_embeddings.pkl`、预训练视觉权重、训练好的 `ckpt`
 3. `rlbench.demo_path` 必须指向 `data/eval_raw` 根目录，而不是具体某个任务目录
 4. `framework.eval_type` 在当前 PPI 评测实现里只接受整数；这里统一固定为 `0`
 5. 当前 PPI 评测里，真正控制 `eval_data.csv` 是否落盘的关键开关是 `framework.eval_save_metrics=true`
@@ -1756,7 +1825,7 @@ bash scripts/ppi/inference/evaluate_ppi_edge_phone.sh
 
 **解决**：
 - `rlbench.demo_path` 应指向 `data/eval_raw`（根目录）
-- 确保软链接正确：`data/eval_raw/${TASK_DIR}` → `/mnt/rlbench_data/${TASK_DIR}.test`
+- 确保软链接正确：`data/eval_raw/${TASK_DIR}` → `/mnt/occ_data/${TASK_DIR}`
 
 ### 11.6 point_flow_type 不匹配
 

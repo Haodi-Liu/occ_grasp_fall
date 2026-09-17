@@ -2,7 +2,7 @@
 
 本文针对当前 `occ_grasp_fall` 工作区里的 PPI 代码路径，而不是原始 PPI 仓库的旧目录结构。目标是把下面这条链路一次讲清楚：
 
-`/mnt/rlbench_data` 原始 RLBench 数据 -> `.train` 预处理 -> PPI 训练 -> `.test` 上的 RLBench 仿真评估
+`/mnt/occ_data` 原始 RLBench 数据 -> `<task>.train` 预处理 -> PPI 训练 -> 无后缀 `<task>` 上的 RLBench 仿真评估
 
 ## 0. 先说结论
 
@@ -12,28 +12,24 @@
 2. PPI 训练真正需要的是两部分：
    - 原始 demo：`data/training_raw/<task>/all_variations/episodes`
    - 预处理产物：`data/training_processed/{point_cloud,dino_feature,point_flow,norm_stats}`
-3. `.test` 上的 PPI 评估不会去读 `.test` 的离线 point cloud / dino / point flow；评估阶段会在线重建这些信息，所以 `.test` 只需要原始 demo、语言嵌入、模型权重和基础预训练权重。
-4. 当前训练代码不会直接使用 `/mnt/rlbench_data/*.val`；它会在 `.train` 内部按 `val_ratio` 再切一份验证集。
-5. 当前 `/mnt/rlbench_data` 只有 `.train/.val/.test` 后缀目录，而 RLBench 评估代码要求 `demo_path/<task_name>/all_variations/episodes` 这种无后缀目录，所以训练和评估都必须先做软链接适配。
+3. PPI 评估不会读取评测集的离线 point cloud / dino / point flow；评估阶段会在线重建这些信息，所以评测集只需要原始 demo、语言嵌入、模型权重和基础预训练权重。
+4. `/mnt/occ_data` 当前不单独提供 `<task>.val`；训练代码在 `.train` 内部按 `val_ratio` 切分验证集。
+5. 当前命名为训练集 `<task>.train`、评测集 `<task>`。为了与现有 PPI yaml/sh 中的 `data/training_raw` 和 `data/eval_raw` 稳定对齐，仍建议建立两组工作区软链接。
 
 ## 1. 当前数据现状
 
-当前 `/mnt/rlbench_data` 里可直接看到 4 个任务，每个任务的 episode 数量是：
+当前 `/mnt/occ_data` 里可直接看到 4 个任务，每个任务的 episode 数量是：
 
 | 任务目录 | episode 数 |
 |---|---:|
 | `bimanual_edge_phone.train` | 150 |
-| `bimanual_edge_phone.val` | 50 |
-| `bimanual_edge_phone.test` | 30 |
+| `bimanual_edge_phone` | 30 |
 | `bimanual_pivot_phone.train` | 150 |
-| `bimanual_pivot_phone.val` | 50 |
-| `bimanual_pivot_phone.test` | 30 |
+| `bimanual_pivot_phone` | 30 |
 | `bimanual_pick_plate.train` | 150 |
-| `bimanual_pick_plate.val` | 50 |
-| `bimanual_pick_plate.test` | 30 |
+| `bimanual_pick_plate` | 30 |
 | `bimanual_pick_fork.train` | 150 |
-| `bimanual_pick_fork.val` | 50 |
-| `bimanual_pick_fork.test` | 30 |
+| `bimanual_pick_fork` | 30 |
 
 下面所有命令默认基于这套现状。
 
@@ -287,12 +283,12 @@ export EPISODE_LENGTH=400
 export QUERY_FREQ=10
 ```
 
-## 4. 把 `.train` / `.test` 数据映射成代码能识别的目录
+## 4. 把训练/评测数据映射成代码能识别的目录
 
 当前代码最稳妥的做法是建立两套软链接根目录：
 
-- `data/training_raw/<task>` 指向 `/mnt/rlbench_data/<task>.train`
-- `data/eval_raw/<task>` 指向 `/mnt/rlbench_data/<task>.test`
+- `data/training_raw/<task>` 指向 `/mnt/occ_data/<task>.train`
+- `data/eval_raw/<task>` 指向 `/mnt/occ_data/<task>`（评测目录无 `.test` 后缀）
 
 命令如下：
 
@@ -303,14 +299,28 @@ mkdir -p data/training_processed/dino_feature
 mkdir -p data/training_processed/point_flow
 mkdir -p data/training_processed/norm_stats
 
+data_root=/mnt/occ_data
+
 for task in \
   bimanual_edge_phone \
   bimanual_pivot_phone \
   bimanual_pick_plate \
   bimanual_pick_fork
 do
-  ln -sfn "/mnt/rlbench_data/${task}.train" "data/training_raw/${task}"
-  ln -sfn "/mnt/rlbench_data/${task}.test"  "data/eval_raw/${task}"
+  train_source="${data_root}/${task}.train"
+  eval_source="${data_root}/${task}"
+
+  test -d "${train_source}/all_variations/episodes" || {
+    echo "missing training data: ${train_source}" >&2
+    exit 1
+  }
+  test -d "${eval_source}/all_variations/episodes" || {
+    echo "missing eval data: ${eval_source}" >&2
+    exit 1
+  }
+
+  ln -sfn "${train_source}" "data/training_raw/${task}"
+  ln -sfn "${eval_source}"  "data/eval_raw/${task}"
 done
 ```
 
@@ -335,7 +345,7 @@ PPI 数据读取和评估都要用语言嵌入字典。这个文件建议做成�
 data/training_processed/instruction_embeddings.pkl
 ```
 
-下面的脚本会扫描 `/mnt/rlbench_data/*.train`、`*.val`、`*.test` 中所有 `variation_descriptions.pkl`，去重后生成 CLIP RN50 文本特征。
+下面的脚本会扫描 `/mnt/occ_data/<task>.train` 和无后缀评测目录 `/mnt/occ_data/<task>` 中的所有 `variation_descriptions.pkl`，去重后生成 CLIP RN50 文本特征。
 
 注意：
 
@@ -351,22 +361,46 @@ import torch
 
 from helpers.clip.core.clip import build_model, load_clip, tokenize
 
-data_root = "/mnt/rlbench_data"
+data_root = "/mnt/occ_data"
+task_names = (
+    "bimanual_edge_phone",
+    "bimanual_pivot_phone",
+    "bimanual_pick_plate",
+    "bimanual_pick_fork",
+)
 instructions = set()
+description_file_count = 0
 
-for pattern in ("*.train", "*.val", "*.test"):
-    for task_dir in sorted(glob.glob(os.path.join(data_root, pattern))):
-        episodes_root = os.path.join(task_dir, "all_variations", "episodes")
-        for episode_dir in sorted(glob.glob(os.path.join(episodes_root, "episode*"))):
-            path = os.path.join(episode_dir, "variation_descriptions.pkl")
-            if not os.path.exists(path):
-                continue
-            with open(path, "rb") as f:
-                descriptions = pickle.load(f)
-            for text in descriptions:
-                instructions.add(text)
+source_dirs = []
+for task_name in task_names:
+    source_dirs.extend(
+        (
+            os.path.join(data_root, f"{task_name}.train"),
+            os.path.join(data_root, task_name),
+        )
+    )
 
-print(f"found {len(instructions)} unique instructions")
+for task_dir in source_dirs:
+    episodes_root = os.path.join(task_dir, "all_variations", "episodes")
+    if not os.path.isdir(episodes_root):
+        raise FileNotFoundError(f"missing episodes directory: {episodes_root}")
+    for episode_dir in sorted(glob.glob(os.path.join(episodes_root, "episode*"))):
+        path = os.path.join(episode_dir, "variation_descriptions.pkl")
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        with open(path, "rb") as f:
+            descriptions = pickle.load(f)
+        description_file_count += 1
+        for text in descriptions:
+            instructions.add(text)
+
+if not instructions:
+    raise RuntimeError("no instructions found")
+
+print(
+    f"loaded {description_file_count} description files; "
+    f"found {len(instructions)} unique instructions"
+)
 
 model, _ = load_clip("RN50", jit=False, device="cpu")
 clip_model = build_model(model.state_dict()).to("cpu").eval()
@@ -385,6 +419,22 @@ with open(out_path, "wb") as f:
     pickle.dump(embedding_dict, f)
 
 print(f"saved to {out_path}")
+PY
+```
+
+生成后验收：
+
+```bash
+python - <<'PY'
+import os
+import pickle
+
+path = "data/training_processed/instruction_embeddings.pkl"
+with open(path, "rb") as f:
+    embeddings = pickle.load(f)
+
+assert embeddings, "instruction embedding dictionary is empty"
+print(f"{path}: {len(embeddings)} instructions, {os.path.getsize(path)} bytes")
 PY
 ```
 
@@ -445,7 +495,7 @@ sed -n '1,200p' "ppi/config/task/${TASK_KEY}.yaml"
 
 - `prediction_type` 这里建议直接用 `keyframe_continuous`，因为当前训练 shell 脚本和策略代码都按这一路径在写。
 - `point_flow_type` 必须和离线 point flow 目录保持一致，这里统一用 `world_ordered_rps200`。
-- `val_ratio=0.2` 表示从 `.train` 的 150 个 episode 中内部切 20% 做验证。当前 `.val` 分片不会被训练代码自动使用。
+- `val_ratio=0.2` 表示从 `.train` 的 150 个 episode 中内部切 20% 做验证。当前 `/mnt/occ_data` 不单独提供 `<task>.val`。
 - `max_train_episodes=150` 这里只是“训练 episode 上限”，等价于不额外下采样；在 `val_ratio=0.2` 时，实际参与训练的 episode 数大约还是 120 左右。
 - `kp_num` 和 `add_openess_sampling` 对这 4 个任务没有现成官方配置，上面是保守起点。若后面发现抓手开合转折学得差，再考虑把 `add_openess_sampling` 改成 `true` 重新训练。
 
@@ -814,12 +864,12 @@ export CKPT_NAME=epoch500_model
 
 注意：`CKPT_NAME` 不要带 `.pth.tar` 后缀。
 
-## 10. 在 `.test` 上做 RLBench 仿真评估
+## 10. 在无后缀评测集上做 RLBench 仿真评估
 
 这里最重要的事实是：
 
-- 评估使用的是 `data/eval_raw/${TASK_DIR}` 指向的 `.test` 原始 demo
-- 不需要先给 `.test` 生成 point cloud / dino / point flow
+- 评估使用的是 `data/eval_raw/${TASK_DIR}` 指向的 `/mnt/occ_data/${TASK_DIR}` 原始 demo
+- 不需要先给评测数据生成 point cloud / dino / point flow
 - `framework.eval_type` 必须是整数，否则 `eval_ppi.py` 会直接抛 `Unknown eval type`
 
 运行命令：
@@ -892,7 +942,7 @@ cinematic_recorder.save_path="$(pwd)/eval_videos/${TASK_DIR}/${RUN_NAME}"
    - `norm_stats`
 7. 用 `train_ppi_ddp.py` 训练
 8. 给最新训练目录建一层 `eval_weights/${TASK_DIR}/0/${RUN_NAME}` 软链接
-9. 用 `eval_ppi.py` 在 `.test` 上评估
+9. 用 `eval_ppi.py` 在 `/mnt/occ_data/<task>` 对应的评测集上评估
 
 ## 12. 最常见的坑
 
@@ -904,18 +954,17 @@ cinematic_recorder.save_path="$(pwd)/eval_videos/${TASK_DIR}/${RUN_NAME}"
 cd /home/hdliu/occ_grasp_fall/occ_grasp_models
 ```
 
-### 12.2 直接把 `rlbench.demo_path` 指向 `/mnt/rlbench_data`
+### 12.2 数据根目录已换成 `/mnt/occ_data`
 
-当前 `/mnt/rlbench_data` 没有无后缀的 `bimanual_pivot_phone/` 目录，只有 `bimanual_pivot_phone.test/`。  
-评估代码会按无后缀目录去找，所以直接指过去会失败。一定要先做：
+当前 `/mnt/occ_data` 已有无后缀的评测目录，因此在手动覆盖 `rlbench.demo_path=/mnt/occ_data` 时，评测代码可以直接找到数据。但现有 PPI 评测脚本明确使用 `$(pwd)/data/eval_raw`，为避免逐个修改脚本，仍推荐保留这层软链接：
 
 ```text
-data/eval_raw/<task> -> /mnt/rlbench_data/<task>.test
+data/eval_raw/<task> -> /mnt/occ_data/<task>
 ```
 
 ### 12.3 以为 `.val` 会被训练代码自动使用
 
-不会。当前 `RLBench2Dataset` 的验证集是从 `.train` 里按 `val_ratio` 再切出来的。`.val` 目前只是额外存在，但不会被自动消耗。
+不会。当前 `RLBench2Dataset` 的验证集是从 `.train` 里按 `val_ratio` 再切出来的；`/mnt/occ_data` 当前也没有单独的 `<task>.val` 目录。
 
 ### 12.4 `save_norm_stats.py` 输出名和训练读取名不一致
 
@@ -963,6 +1012,6 @@ Not enough points inside the bounding box
 2. 先只对 `episode0` 到 `episode2` 试跑 point cloud / dino / point flow
 3. 确认 point flow 的目标框正常后，再全量预处理 `0..149`
 4. 先训练较少 epoch 验证链路
-5. 最后再用完整 epoch 和完整 `.test` 30 个 episode 做正式评估
+5. 最后再用完整 epoch 和无后缀评测目录中的 30 个 episode 做正式评估
 
 这样最省时间，也最容易定位问题到底出在数据、预处理、训练还是评估。

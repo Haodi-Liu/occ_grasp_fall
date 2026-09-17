@@ -3142,6 +3142,13 @@ cinematic_recorder:
 
 相关 conda 环境是 `ppi`。如果 `eval_ppi.yaml` 已配置好当前要评估的权重路径，可以先做 1 个 episode 的在线检查：
 
+运行前还必须补齐两项数据前置：
+
+- 按 [PPI 完整操作指南第 4 章](../05_ppi/guides/PPI_OCC_GRASP_COMPLETE_GUIDE_local.md#4-生成语言嵌入) 生成 `data/training_processed/instruction_embeddings.pkl`
+- 按 [PPI 完整操作指南第 8.3 节](../05_ppi/guides/PPI_OCC_GRASP_COMPLETE_GUIDE_local.md#83-手动建立-dataeval_raw-软链接) 建立 `data/eval_raw/<task> -> /mnt/occ_data/<task>`
+
+当前 `/mnt/occ_data` 中训练目录命名为 `<task>.train`，评测目录命名为无后缀 `<task>`；不要继续使用旧路径 `/mnt/rlbench_data/<task>.test`。
+
 ```bash
 conda activate ppi
 cd /home/hdliu/occ_grasp_fall/occ_grasp_models

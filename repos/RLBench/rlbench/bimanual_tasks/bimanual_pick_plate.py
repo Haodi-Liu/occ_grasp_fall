@@ -613,7 +613,7 @@ class BimanualPickPlate(BimanualTask):
         )
         con3 = ClearPathCondition(
             pusher_gripper, self.target_object, pusher_tip,
-            lift_waypoints=lift_waypoints, min_clearance=0.18
+            lift_waypoints=lift_waypoints, min_clearance=0.135
         )
         con4 = LiftedCondition(self.target_object, min_height=0.85)
 

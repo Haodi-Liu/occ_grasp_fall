@@ -749,7 +749,7 @@ class BimanualEdgePhone(BimanualTask):
         # ====== 单独阶段条件定义 ======
         con1 = EdgeOverhangCondition(
             self.target_object, self.box_edge, self.phone_edge,
-            min_overhang=0.03, velocity_threshold=0.2, required_stable_frames=3
+            min_overhang=0.025, velocity_threshold=0.2, required_stable_frames=3
         )
         con2 = StableGraspCondition(
             grasper_gripper, self.target_object,
@@ -760,7 +760,7 @@ class BimanualEdgePhone(BimanualTask):
         )
         con3 = ClearPathCondition(
             pusher_gripper, self.target_object, pusher_tip,
-            lift_waypoints=lift_waypoints, min_clearance=0.34
+            lift_waypoints=lift_waypoints, min_clearance=0.29
         )
         con4 = LiftedCondition(self.target_object, min_height=1)
 

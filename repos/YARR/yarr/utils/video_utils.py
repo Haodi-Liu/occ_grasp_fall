@@ -193,14 +193,18 @@ class TaskRecorder(object):
         y = max(0, min(y, height - size))
         return frame_bgr[y:y + size, x:x + size], f"_x{x}_y{y}_s{size}"
 
-    def _get_env_overlay_state(self):
+    def _get_env_overlay_state(self, include_phase=True):
         if self._env is None:
             return {}
         if hasattr(self._env, "get_env_overlay_state"):
-            return self._env.get_env_overlay_state()
+            if include_phase:
+                return self._env.get_env_overlay_state()
+            return self._env.get_env_overlay_state(include_phase=False)
         inner_env = getattr(self._env, "env", None)
         if inner_env is not None and hasattr(inner_env, "get_env_overlay_state"):
-            return inner_env.get_env_overlay_state()
+            if include_phase:
+                return inner_env.get_env_overlay_state()
+            return inner_env.get_env_overlay_state(include_phase=False)
         return {}
 
     def _apply_overlay(self, frame_rgb, obs: Observation):
@@ -210,7 +214,8 @@ class TaskRecorder(object):
         if getattr(cfg, "overlay_source", "env") != "env":
             return frame_rgb
 
-        state = self._get_env_overlay_state()
+        draw_phase = bool(getattr(cfg, "overlay_draw_phase", True))
+        state = self._get_env_overlay_state(include_phase=draw_phase)
         if not state:
             return frame_rgb
 
@@ -233,14 +238,18 @@ class TaskRecorder(object):
         if bool(getattr(cfg, "overlay_draw_xyz_table", False)):
             self._draw_xyz_table(frame_bgr, points_3d, draw_keypoints, draw_grippers)
 
+        self._draw_subtask_prompt(frame_bgr, state)
+
         return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
     def _draw_state_text(self, frame_bgr, state):
-        phase_progress = state.get("phase_progress") or {}
-        phase = int(phase_progress.get("current_phase", 1))
-        phase_name = phase_progress.get("current_phase_name", "PreManipulation")
         strategy_name = state.get("strategy_name", "Unknown")
-        text_parts = [strategy_name, f"{phase} {phase_name}"]
+        text_parts = [strategy_name]
+        if bool(getattr(self._overlay_cfg, "overlay_draw_phase", True)):
+            phase_progress = state.get("phase_progress") or {}
+            phase = int(phase_progress.get("current_phase", 1))
+            phase_name = phase_progress.get("current_phase_name", "PreManipulation")
+            text_parts.append(f"{phase} {phase_name}")
         if bool(getattr(self._overlay_cfg, "overlay_draw_gt_arm_scheme", True)):
             gt_label = self._format_gt_arm_scheme_label(state)
             if gt_label:
@@ -252,6 +261,48 @@ class TaskRecorder(object):
             cv2.FONT_HERSHEY_DUPLEX, 0.8 * scale,
             (255, 255, 255), max(2, int(round(2 * scale)))
         )
+
+    def _draw_subtask_prompt(self, frame_bgr, state):
+        prompt = state.get("active_subtask_prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return
+
+        subtask_type = state.get("active_subtask_type")
+        label = "Subtask: " if subtask_type is None else f"Subtask {subtask_type}: "
+        text = label + prompt.strip()
+
+        scale = max(1.0, frame_bgr.shape[1] / 1280.0)
+        font = cv2.FONT_HERSHEY_DUPLEX
+        font_scale = 0.55 * scale
+        thickness = max(1, int(round(scale)))
+        max_width = frame_bgr.shape[1] - int(round(40 * scale))
+        lines = self._wrap_text(text, font, font_scale, thickness, max_width)
+
+        x = int(round(20 * scale))
+        line_height = int(round(27 * scale))
+        bottom_y = frame_bgr.shape[0] - int(round(72 * scale))
+        first_y = bottom_y - line_height * (len(lines) - 1)
+        for index, line in enumerate(lines):
+            self._draw_text_with_shadow(
+                frame_bgr, line, (x, first_y + index * line_height),
+                font, font_scale, (255, 255, 255), thickness
+            )
+
+    @staticmethod
+    def _wrap_text(text, font, font_scale, thickness, max_width):
+        lines = []
+        current = ""
+        for word in text.split():
+            candidate = word if not current else current + " " + word
+            width = cv2.getTextSize(candidate, font, font_scale, thickness)[0][0]
+            if current and width > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
 
     @staticmethod
     def _format_gt_arm_scheme_label(state):

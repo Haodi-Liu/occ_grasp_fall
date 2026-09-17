@@ -11,6 +11,12 @@ _EXPECTED_ACTION_MODE = {
     "arm_action_mode": "BimanualJointPosition",
     "action_mode": "BimanualJointPositionActionMode",
 }
+_ORACLE_TASKS = {
+    "bimanual_edge_phone",
+    "bimanual_pivot_phone",
+    "bimanual_pick_plate",
+    "bimanual_pick_fork",
+}
 
 
 def create_agent(cfg: DictConfig):
@@ -38,8 +44,20 @@ def create_agent(cfg: DictConfig):
                 % (field_name, expected_value, actual_value)
             )
 
+    oracle_enabled = bool(getattr(cfg.method, "oracle_phase_enabled", False))
+    oracle_task = None
+    if oracle_enabled:
+        tasks = [str(task) for task in cfg.rlbench.tasks]
+        if len(tasks) != 1:
+            raise ValueError("oracle phase evaluation requires exactly one task")
+        oracle_task = tasks[0]
+        if oracle_task not in _ORACLE_TASKS:
+            raise ValueError("unsupported oracle task: %s" % oracle_task)
+
     return OpenPIPolicyAgent(
         host=str(cfg.method.openpi_host),
         port=int(cfg.method.openpi_port),
         replan_steps=int(cfg.method.replan_steps),
+        oracle_phase_enabled=oracle_enabled,
+        oracle_phase_task=oracle_task,
     )

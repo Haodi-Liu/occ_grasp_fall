@@ -265,6 +265,16 @@ class UnimanualDiscrete(GripperActionMode):
 
 
 class BimanualDiscrete(Discrete):
+
+    @staticmethod
+    def _step_scene(scene):
+        """Step through Scene so registered callbacks observe gripper motion."""
+        if hasattr(scene, 'step'):
+            scene.step()
+        else:
+            # Keep lightweight downstream test doubles backward compatible.
+            scene.pyrep.step()
+            scene.task.step()
     
     def _actuate(self, scene, action):
 
@@ -280,8 +290,7 @@ class BimanualDiscrete(Discrete):
             if not left_done:
                 left_done = scene.robot.left_gripper.actuate(left_action, velocity=0.2)
             done = right_done and left_done
-            scene.pyrep.step()
-            scene.task.step()
+            self._step_scene(scene)
 
     def action(self, scene: Scene, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32)
@@ -349,8 +358,7 @@ class BimanualDiscrete(Discrete):
             if opened_this_step:
                 # Step a few more times to allow objects to drop
                 for _ in range(10):
-                    scene.pyrep.step()
-                    scene.task.step()
+                    self._step_scene(scene)
 
     def action_shape(self, scene: Scene) -> tuple:
         return 2,

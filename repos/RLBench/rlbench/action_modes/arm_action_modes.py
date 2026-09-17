@@ -366,6 +366,7 @@ class EndEffectorPoseViaPlanning(ArmActionMode):
                         trials_per_goal=5,
                         algorithm=Algos.RRTConnect
                     )
+                    return path
         except ConfigurationPathError as e:
             raise InvalidActionError(
                 'A path could not be found. Most likely due to the target '

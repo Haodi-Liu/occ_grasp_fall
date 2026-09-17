@@ -6,9 +6,9 @@ defaults:
 rlbench:
     task_name: "multi"
     tasks: [bimanual_pick_plate]
-    # /mnt/rlbench_data/<task> is already a symlink to /mnt/rlbench_data/<task>.test.
+    # Evaluation demos are stored at /mnt/occ_data/<task>, without a .test suffix.
     # RLBench expects the suffix-free task directory name, so keep demo_path at the root.
-    demo_path: /mnt/rlbench_data
+    demo_path: /mnt/occ_data
     episode_length: 600
     cameras: ["front", "wrist_left", "wrist_right"]
     camera_resolution: [256, 256]
@@ -29,7 +29,7 @@ framework:
     logdir: '/home/hdliu/arm_test/bimanual_pick_plate'
     # start_seed only affects occ's output directory namespace:
     # <logdir>/<task_name>/<method.name>/seed<start_seed>/...
-    start_seed: 0
+    start_seed: 1
     record_every_n: 5
 
     eval_envs: 1
@@ -43,8 +43,9 @@ framework:
 
 cinematic_recorder:
     enabled: True
-    max_success_videos: 10
-    max_fail_videos: 10
+    save_video: True
+    max_success_videos: 30
+    max_fail_videos: 30
     camera_resolution: [1280, 720]
     fps: 30
     rotate_speed: 0.005
@@ -54,4 +55,5 @@ cinematic_recorder:
     overlay_draw_keypoints: True
     overlay_draw_grippers: True
     overlay_draw_gt_arm_scheme: True
+    overlay_draw_phase: True
     overlay_draw_xyz_table: False
