@@ -142,7 +142,7 @@ class ClearPathCondition(Condition):
                  target_object: Shape,
                  aux_tip_dummy: Dummy,
                  lift_waypoints: List[Dummy] = None,
-                 min_clearance: float = 0.15):
+                 min_clearance: float = 0.21):
         self.aux_gripper = aux_gripper
         self.target_object = target_object
         self.aux_tip_dummy = aux_tip_dummy
@@ -613,7 +613,7 @@ class BimanualPickPlate(BimanualTask):
         )
         con3 = ClearPathCondition(
             pusher_gripper, self.target_object, pusher_tip,
-            lift_waypoints=lift_waypoints, min_clearance=0.135
+            lift_waypoints=lift_waypoints, min_clearance=0.21
         )
         con4 = LiftedCondition(self.target_object, min_height=0.85)
 
@@ -678,26 +678,26 @@ class BimanualPickPlate(BimanualTask):
 
         # ===== [强制测试] 使用 left_grasper 方案 =====
         # 恢复自动选择：注释掉下面4行，取消注释自动选择部分
-        # self.active_waypoint_mode = 'left_grasper'
-        # self.current_role_assignment = {'grasper': 'left', 'pusher': 'right'}
-        # self._setup_waypoint_mapping()
-        # logging.info(f"[FORCE TEST] Using left_grasper scheme")
+        self.active_waypoint_mode = 'right_grasper'
+        self.current_role_assignment = {'grasper': 'right', 'pusher': 'left'}
+        self._setup_waypoint_mapping()
+        logging.info(f"[FORCE TEST] Using right_grasper scheme")
 
-        self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
-            self.waypoint_sets,
-            critical_pusher_indices=[0]  # 检查第一个 pusher 路径点
-        )
-        if role_assignment != self.current_role_assignment:
-            self.current_role_assignment = role_assignment
-            self._setup_waypoint_mapping()
-            logging.info(f"Scheme selected: {self.active_waypoint_mode}, "
-                        f"roles: {self.current_role_assignment}")
+        # self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
+        #     self.waypoint_sets,
+        #     critical_pusher_indices=[0]  # 检查第一个 pusher 路径点
+        # )
+        # if role_assignment != self.current_role_assignment:
+        #     self.current_role_assignment = role_assignment
+        #     self._setup_waypoint_mapping()
+        #     logging.info(f"Scheme selected: {self.active_waypoint_mode}, "
+        #                 f"roles: {self.current_role_assignment}")
 
-        # ===== [临时] 仅收集 left_grasper 方案，否则跳过 =====
+        # ===== [临时] 仅收集 right_grasper 方案，否则跳过 =====
         # 恢复正常收集：注释掉下面2行
-        # from rlbench.backend.exceptions import DemoError
-        # if self.active_waypoint_mode != 'left_grasper':
-        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want left_grasper", self)
+        from rlbench.backend.exceptions import DemoError
+        if self.active_waypoint_mode != 'right_grasper':
+            raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want right_grasper", self)
 
         self._setup_phased_evaluator()
         if self.phased_evaluator:

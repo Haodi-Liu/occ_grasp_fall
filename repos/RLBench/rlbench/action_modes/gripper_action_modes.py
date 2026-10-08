@@ -322,6 +322,12 @@ class BimanualDiscrete(Discrete):
             if not self._detach_before_open:
                 self._actuate(scene, binary_action)
 
+        if right_changed and (right_action == 1.0 or not self._attach_grasped_objects):
+            scene.robot.right_gripper.release()
+        if left_changed and (left_action == 1.0 or not self._attach_grasped_objects):
+            scene.robot.left_gripper.release()
+        if (right_changed or left_changed) and self._detach_before_open:
+            self._actuate(scene, binary_action)
 
         if right_changed:
             if right_action == 0.0 and self._attach_grasped_objects:
@@ -332,9 +338,6 @@ class BimanualDiscrete(Discrete):
                         logging.warning("Object with name %s is already grasped by left robot", g_obj.get_name())
                     else:
                         scene.robot.right_gripper.grasp(g_obj)
-            else:
-                # If gripper open action, the check for un-grasp.
-                scene.robot.right_gripper.release()
         if left_changed:
             if left_action == 0.0 and self._attach_grasped_objects:
                 right_grasped_objects = scene.robot.right_gripper.get_grasped_objects()
@@ -344,13 +347,8 @@ class BimanualDiscrete(Discrete):
                         logging.warning("Object with name %s is already grasped by right robot", g_obj.get_name())
                     else:
                         scene.robot.left_gripper.grasp(g_obj)
-            else:
-                # If gripper open action, the check for un-grasp.
-                scene.robot.left_gripper.release()
 
         if right_changed or left_changed:
-            if self._detach_before_open:
-                self._actuate(scene, binary_action)
             opened_this_step = (
                 (right_changed and right_action == 1.0)
                 or (left_changed and left_action == 1.0)

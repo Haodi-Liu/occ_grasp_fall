@@ -6,6 +6,15 @@ import logging
 from functools import partial
 import multiprocessing as mp
 import pickle
+
+# Set defaults before numerical libraries initialize their thread pools.
+# Spawned workers inherit these settings; explicit user overrides are kept.
+if __name__ in ("__main__", "__mp_main__"):
+    for thread_variable in (
+        "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"
+    ):
+        os.environ.setdefault(thread_variable, "1")
+
 import numpy as np
 import imageio
 import cv2
@@ -458,6 +467,36 @@ class HQAnnotatedDemoRecorder:
         self._camera = None
 
 
+def _add_physics_steps(demo):
+    """Validate the recorded simulator clock and number steps from the first frame."""
+    if len(demo) == 0:
+        raise RuntimeError("Cannot add physics steps to an empty demo.")
+    try:
+        times = np.asarray([obs.misc["sim_time"] for obs in demo], dtype=np.float64)
+        dts = np.asarray([obs.misc["sim_dt"] for obs in demo], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Demo is missing valid simulation timing fields.") from exc
+    if (times.shape != (len(demo),) or dts.shape != times.shape
+            or not np.isfinite(times).all() or not np.isfinite(dts).all()
+            or np.any(times < 0) or np.any(dts <= 0)
+            or not np.all(dts == dts[0])):
+        raise RuntimeError("Demo needs finite times and a constant positive sim_dt.")
+
+    # The simulator clock is float32; its resolution depends on absolute uptime.
+    tolerance = max(1e-6, float(np.spacing(np.float32(times.max()))))
+    if tolerance >= dts[0] / 4:
+        raise RuntimeError("Simulation clock precision is too low to resolve physics steps.")
+    deltas = np.diff(times)
+    increments = np.rint(deltas / dts[0])
+    if (np.any(deltas < 0) or not np.allclose(
+            deltas, increments * dts[0], rtol=0, atol=tolerance)):
+        raise RuntimeError("Demo simulation time went backwards or advanced by a noninteger step.")
+
+    steps = np.concatenate(([0], np.cumsum(increments.astype(np.int64))))
+    for obs, step in zip(demo, steps):
+        obs.misc["physics_step"] = int(step)
+
+
 def save_demo(demo, example_path, variation, save_video=False, video_camera="front", video_fps=30):
     data_types = ["rgb", "depth", "point_cloud", "mask"]
     #full_camera_names = list(map(lambda x: ('_'.join(x), x[-1]), product(camera_names, data_types)))
@@ -518,6 +557,8 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
     """Each thread will choose one task and variation, and then gather
     all the episodes_per_task for that variation."""
 
+    cv2.setNumThreads(1)
+
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
 
@@ -526,6 +567,12 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
     logging.root.name = task_name
 
     logging.info("Collecting data for %s", task_name)
+    logging.info(
+        "Collection CPU threads: OpenCV=%d, OPENBLAS_NUM_THREADS=%s, "
+        "OMP_NUM_THREADS=%s, MKL_NUM_THREADS=%s",
+        cv2.getNumThreads(), os.environ.get("OPENBLAS_NUM_THREADS", "unset"),
+        os.environ.get("OMP_NUM_THREADS", "unset"),
+        os.environ.get("MKL_NUM_THREADS", "unset"))
     if save_video:
         logging.info(
             "Demo video profile: %s (camera=%s, fps=%d)",
@@ -575,7 +622,7 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
 
         abort_variation = False
         # for ex_idx in range(episodes_per_task):
-        for ex_idx in range(15, 30):  # 从episode100到episode130，共30个
+        for ex_idx in range(7, 20):  # 从episode100到episode130，共30个
             attempts = 20           # 真正错误的重试次数
             scheme_skips = 0        # DemoError（方案过滤）计数
             max_scheme_skips = 20   # 方案过滤的最大重试次数（自由选择scheme时此值无影响）
@@ -627,6 +674,7 @@ def run_all_variations(task_name, headless, save_path, episodes_per_task,
                     demo, = task_env.get_demos(
                         amount=1, live_demos=True, **demo_kwargs)
                     validate_bimanual_action_commands(demo)
+                    _add_physics_steps(demo)
 
                     # ===== 获取并记录scheme信息 =====
                     active_scheme = 'unknown'

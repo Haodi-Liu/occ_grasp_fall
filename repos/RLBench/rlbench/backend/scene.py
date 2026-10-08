@@ -596,10 +596,15 @@ class Scene(object):
             self.task.get_low_dim_state() if
             self._obs_config.task_low_dim_state else None),
 
+        misc = self._get_misc()
+        misc.update({
+            "sim_time": float(sim.simGetSimulationTime()),
+            "sim_dt": float(self.pyrep.get_simulation_timestep()),
+        })
         observation_data.update({
             "task_low_dim_state": task_low_dim_state,
             "perception_data": perception_data,
-            "misc": self._get_misc(),
+            "misc": misc,
             "object_6d_pose": self._get_object_6d_pose(),
         })
 

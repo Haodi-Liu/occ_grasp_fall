@@ -722,6 +722,13 @@ class BimanualPivotPhone(BimanualTask):
         # 位置限制：将场景位置钳制到默认位置附近
         self._clamp_position_to_bounds()
 
+        # ===== [强制测试] 使用 right_grasper 方案 =====
+        # 恢复自动选择：注释掉下面4行，取消注释自动选择部分
+        # self.active_waypoint_mode = 'left_grasper'
+        # self.current_role_assignment = {'grasper': 'left', 'pusher': 'right'}
+        # self._setup_waypoint_mapping()
+        # logging.info(f"[FORCE TEST] Using left_grasper scheme")
+
         # 根据可行性和成本选择最优方案
         self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
             self.waypoint_sets,

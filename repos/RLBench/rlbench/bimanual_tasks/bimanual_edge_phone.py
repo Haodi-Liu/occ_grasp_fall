@@ -833,28 +833,28 @@ class BimanualEdgePhone(BimanualTask):
         """
         # ===== [强制测试] 使用 left_grasper 方案 =====
         # 恢复自动选择：注释掉下面4行，取消注释自动选择部分
-        # self.active_waypoint_mode = 'left_grasper'
-        # self.current_role_assignment = {'grasper': 'left', 'pusher': 'right'}
-        # self._setup_waypoint_mapping()
-        # logging.info(f"[FORCE TEST] Using left_grasper scheme")
+        self.active_waypoint_mode = 'left_grasper'
+        self.current_role_assignment = {'grasper': 'left', 'pusher': 'right'}
+        self._setup_waypoint_mapping()
+        logging.info(f"[FORCE TEST] Using left_grasper scheme")
 
         # ===== [自动选择] 根据可行性和成本选择最优方案 =====
-        self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
-            self.waypoint_sets,
-            critical_pusher_indices=[0]  # 检查第一个 pusher 路径点（Phase 1 起始点）
-        )
-        # 更新角色分配
-        if role_assignment != self.current_role_assignment:
-            self.current_role_assignment = role_assignment
-            self._setup_waypoint_mapping()
-            logging.info(f"Scheme selected: {self.active_waypoint_mode}, "
-                        f"roles: {self.current_role_assignment}")
+        # self.active_waypoint_mode, role_assignment = self.role_selector.select_scheme(
+        #     self.waypoint_sets,
+        #     critical_pusher_indices=[0]  # 检查第一个 pusher 路径点（Phase 1 起始点）
+        # )
+        # # 更新角色分配
+        # if role_assignment != self.current_role_assignment:
+        #     self.current_role_assignment = role_assignment
+        #     self._setup_waypoint_mapping()
+        #     logging.info(f"Scheme selected: {self.active_waypoint_mode}, "
+        #                 f"roles: {self.current_role_assignment}")
 
         # ===== [临时] 仅收集 left_grasper 方案，否则跳过 =====
         # 恢复正常收集：注释掉下面2行
-        # from rlbench.backend.exceptions import DemoError
-        # if self.active_waypoint_mode != 'left_grasper':
-        #     raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want left_grasper", self)
+        from rlbench.backend.exceptions import DemoError
+        if self.active_waypoint_mode != 'left_grasper':
+            raise DemoError(f"Skipping: scheme={self.active_waypoint_mode}, want left_grasper", self)
 
         # ===== 设置分阶段评估器 =====
         self._setup_phased_evaluator()
